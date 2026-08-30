@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
 from .bundle import verify_evidence_bundle, write_evidence_bundle
+from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from .report import write_report
 
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Print privacy-safe normalized data as JSON")
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
     parser.add_argument("--summary-output", type=Path, help="Write an evidence-backed Markdown run summary")
+    parser.add_argument("--junit-output", type=Path, metavar="XML", help="Write quality-gate checks as JUnit XML for CI test reporters")
     parser.add_argument("--bundle", type=Path, metavar="ZIP", help="Write a sanitized evidence bundle with report, JSON, summary, and hash manifest")
     parser.add_argument("--policy", type=Path, metavar="JSON", help="Load reusable quality-gate thresholds from a validated JSON policy")
     parser.add_argument("--compare", type=Path, metavar="BASELINE", help="Compare this run with a baseline JSON/JSONL trace")
@@ -180,6 +182,9 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     if args.summary_output:
         _atomic_write_text(args.summary_output, render_markdown_summary(run, comparison, quality_gate))
         print(f"Summary: {args.summary_output.resolve()}")
+    if args.junit_output:
+        _atomic_write_text(args.junit_output, render_junit_xml(run, quality_gate))
+        print(f"JUnit: {args.junit_output.resolve()}")
     if args.bundle:
         bundle = write_evidence_bundle(run, args.bundle, comparison=comparison, quality_gate=quality_gate)
         print(f"Evidence bundle: {bundle.resolve()}")

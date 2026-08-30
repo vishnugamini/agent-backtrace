@@ -2,11 +2,13 @@ import json
 import hashlib
 from pathlib import Path
 from zipfile import ZipFile
+from xml.etree import ElementTree as ET
 
 import pytest
 
 from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
+from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
@@ -264,6 +266,22 @@ def test_policy_file_is_strict_validated_overridable_and_embedded(tmp_path):
     invalid.write_text(json.dumps({"max_failures": -1, "invented_gate": 2}))
     assert main([str(trace), "--policy", str(invalid), "-o", str(tmp_path / "invalid.html")]) == 2
     assert not (tmp_path / "invalid.html").exists()
+
+
+def test_junit_export_maps_gate_results_and_empty_policy(tmp_path):
+    run = parse_trace(codex_trace(tmp_path))
+    failed_gate = evaluate_policy(run, {"max_failures": 0, "require_evidence": True})
+    failed_gate["policy_source"] = "strict.json"
+    suite = ET.fromstring(render_junit_xml(run, failed_gate))
+    assert suite.attrib["tests"] == "2"
+    assert suite.attrib["failures"] == "1"
+    assert suite.find("./properties/property[@name='policy']").attrib["value"] == "strict.json"
+    assert suite.find("./testcase/failure").attrib["type"] == "max_failures"
+    empty = ET.fromstring(render_junit_xml(run, evaluate_policy(run, {})))
+    assert empty.attrib["skipped"] == "1"
+    junit_path = tmp_path / "quality.xml"
+    assert main([str(codex_trace(tmp_path)), "--max-failures", "1", "--junit-output", str(junit_path), "-o", str(tmp_path / "junit-report.html")]) == 0
+    assert ET.parse(junit_path).getroot().attrib["failures"] == "0"
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

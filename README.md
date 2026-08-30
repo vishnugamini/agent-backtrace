@@ -105,6 +105,16 @@ backtrace-agent current.jsonl \
 
 Policy files accept only documented gate keys, reject unknown keys and invalid types, and require nonnegative thresholds. Explicit CLI values override the corresponding file values; boolean CLI flags enable their checks. The policy filename is preserved in HTML, JSON, Markdown, and terminal output so a result can be traced back to its rule set.
 
+Publish gate results beside normal tests in any JUnit-compatible CI interface:
+
+```bash
+backtrace-agent current.jsonl \
+  --policy examples/strict-policy.json \
+  --junit-output backtrace-quality.xml
+```
+
+Each configured gate becomes one JUnit test case; failed rules include the gate key, actual value, expected value, and evidence. Policy provenance is stored as a suite property. With no configured gates, Backtrace emits one explicitly skipped test instead of pretending a policy passed.
+
 The **Incidents** view groups consecutive failed attempts by operation and only calls an incident recovered when the trace contains a later successful event for that same operation. It reports failed attempts, intervening work, related files, time to recovery, and operations still unresolved. Long-running development services are excluded from incident counts because stopping one is not evidence of a failed task.
 
 The **Side effects** view inventories durable or external mutations separately from ordinary inspection: repository commits and pushes, saved releases, deployments, installs, access changes, external writes, and explicit destructive commands. Read-only deployment status checks are excluded. `--max-destructive-actions` counts attempted destructive operations even when they fail, making it suitable for restrictive CI policies.
