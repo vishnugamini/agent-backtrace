@@ -197,6 +197,11 @@ def test_report_is_self_contained_and_useful(tmp_path):
     assert 'data-view="workflow"' in report
     assert "RECONSTRUCTED WORKFLOW" in report
     assert "MOST COMMON PHASE TRANSITIONS" in report
+    assert 'id="bookmark-event"' in report
+    assert 'id="copy-event-link"' in report
+    assert 'data-view="review"' in report
+    assert "backtrace-review:" in report
+    assert "#event=" in report
     assert "FILES CHANGED" in report
     assert "WHAT NEEDS ATTENTION" in report
     assert r"<\/script>" in render_html(parse_trace('\n'.join([

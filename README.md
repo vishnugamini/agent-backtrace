@@ -120,6 +120,8 @@ The generated HTML report is self-contained: no server, database, API key, CDN, 
 7. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
 8. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
 
+Every event has a **Copy checkpoint link** action. Opening that self-contained report URL restores the exact event inspector through a `#event=...` fragment. You can also bookmark events into a local **Review** queue and export the selected sanitized checkpoints as JSON. Bookmarks use browser-local storage scoped to the report session; they do not edit the report or source trace.
+
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 
 ## Supported input
