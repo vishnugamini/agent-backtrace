@@ -246,6 +246,8 @@ def _command_title(item: dict[str, Any], command: str) -> tuple[str, str]:
     parsed_type = str(primary.get("type") or "")
     name = str(primary.get("name") or "")
     lower = command.lower()
+    if re.search(r"\b(npm|pnpm|yarn) (run )?(dev|start|serve)\b|\b(uvicorn|gunicorn|flask run)\b", lower):
+        return "Ran development service", "service.dev"
     if parsed_type == "read":
         return f"Read {name or 'file'}", "file.read"
     if "pytest" in lower or re.search(r"\bnpm (run )?test\b", lower):
@@ -378,7 +380,8 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
                 if isinstance(parsed, dict) and parsed.get("path"):
                     paths.append(_display_path(str(parsed["path"]), meta.get("cwd")))
             paths.extend(_display_path(path, meta.get("cwd")) for path in _extract_files(command))
-            event = Event(event_id, at_ms, "codex", "error" if status == "error" else "tool", title, detail, status, duration_ms, turn_id, operation, _safe(command, 5000), output, list(dict.fromkeys(paths)), {"exit_code": item.get("exit_code"), "cwd": item.get("cwd")}, item)
+            long_running = bool(re.search(r"\b(npm|pnpm|yarn) (run )?(dev|start|serve)\b|\b(uvicorn|gunicorn|flask run)\b", command, re.I))
+            event = Event(event_id, at_ms, "codex", "error" if status == "error" else "tool", title, detail, status, duration_ms, turn_id, operation, _safe(command, 5000), output, list(dict.fromkeys(paths)), {"exit_code": item.get("exit_code"), "cwd": item.get("cwd"), "long_running": long_running}, item)
         elif item_type == "FileChange":
             changes = item.get("changes") if isinstance(item.get("changes"), dict) else {}
             files = [_display_path(str(path), meta.get("cwd")) for path in changes]
@@ -510,7 +513,7 @@ def detect_signals(events: Iterable[Event], *, loop_threshold: int = 3, stall_ms
             signals.append(Signal("stall", "warning", "Unexplained idle gap", f"{round(gap / 60_000, 1)} minutes between “{previous.title}” and “{current.title}”.", current.id, [previous.id, current.id]))
 
     for event in ordered:
-        if event.duration_ms >= 60_000 and event.kind in {"tool", "error"}:
+        if event.duration_ms >= 60_000 and event.kind in {"tool", "error"} and not event.metadata.get("long_running"):
             signals.append(Signal("slow", "info", "Slow action", f"{event.title} took {round(event.duration_ms/1000, 1)} seconds.", event.id))
     return sorted(signals, key=lambda signal: (ordered.index(next(event for event in ordered if event.id == signal.event_id)), {"error": 0, "warning": 1, "info": 2}.get(signal.severity, 3)))
 

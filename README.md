@@ -18,6 +18,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Separate files actually changed from paths merely mentioned in command output.
 - Build a secret-redacted restart brief at any checkpoint.
 - Export a dependency-free HTML report, sanitized JSON, and an evidence-backed Markdown summary.
+- Compare a current run with a baseline using normalized failure, repetition, stall, tool-time, verification, operation, and file-scope changes.
 
 ## Quick start
 
@@ -39,6 +40,14 @@ backtrace-agent examples/demo.jsonl -o report.html \
   --summary-output summary.md \
   --normalized-output normalized.json
 ```
+
+Compare a new run with a known baseline:
+
+```bash
+backtrace-agent current.jsonl --compare baseline.jsonl -o comparison.html
+```
+
+The comparison report separates regressions from improvements, identifies new and resolved failing operations, and shows how operation counts and changed-file scope moved. Efficiency metrics are normalized per turn or per 100 actions so larger tasks are not automatically judged worse.
 
 Create a restart brief from a specific normalized event:
 
@@ -64,6 +73,7 @@ The generated HTML report is self-contained: no server, database, API key, CDN, 
 3. Inspect exact commands, sanitized output, duration, exit code, and related files.
 4. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
 5. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
+6. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
 
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 

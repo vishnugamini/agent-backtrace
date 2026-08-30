@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, compare_runs, render_markdown_summary
 from backtrace_agent.core import build_restart_brief, detect_signals, parse_trace
 from backtrace_agent.report import render_html
 
@@ -77,6 +77,35 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert "Files changed: 1" in render_markdown_summary(parse_trace(codex_trace(tmp_path)))
 
 
+def test_compare_runs_finds_normalized_improvement(tmp_path):
+    baseline = parse_trace(codex_trace(tmp_path))
+    current = parse_trace(codex_trace(tmp_path))
+    failed = next(event for event in current.events if event.status == "error")
+    failed.status = "ok"
+    failed.kind = "tool"
+    comparison = compare_runs(current, baseline)
+    assert comparison["verdict"] == "improved"
+    assert comparison["resolved_failing_operations"] == ["test"]
+    failure_rate = next(item for item in comparison["metrics"] if item["key"] == "failures_per_100_actions")
+    assert failure_rate["outcome"] == "improved"
+    assert comparison["summary"]["improvements"] >= 2
+    assert compare_runs(baseline, baseline)["verdict"] == "unchanged"
+
+
+def test_comparison_appears_in_report_and_markdown(tmp_path):
+    baseline = parse_trace(codex_trace(tmp_path))
+    current = parse_trace(codex_trace(tmp_path))
+    current.events[1].status = "ok"
+    current.events[1].kind = "tool"
+    comparison = compare_runs(current, baseline)
+    report = render_html(current, comparison)
+    assert 'data-view="compare"' in report
+    assert "BASELINE COMPARISON" in report
+    assert "LARGEST OPERATION COUNT CHANGES" in report
+    assert '"comparison": {' in report
+    assert "## Baseline comparison" in render_markdown_summary(current, comparison)
+
+
 def test_restart_brief_is_checkpointed_and_redacted(tmp_path):
     run = parse_trace(codex_trace(tmp_path))
     brief = build_restart_brief(run, run.events[-1].id)
@@ -94,6 +123,7 @@ def test_report_is_self_contained_and_useful(tmp_path):
     assert "Restart brief" in report
     assert "RUN JOURNEY" in report
     assert "FILES CHANGED" in report
+    assert "WHAT NEEDS ATTENTION" in report
     assert r"<\/script>" in render_html(parse_trace('\n'.join([
         json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "message", "payload": {"content": "</script><script>alert(1)</script>"}}),
     ])))

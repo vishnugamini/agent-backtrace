@@ -7,7 +7,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from .analysis import analyze_run, render_markdown_summary
+from .analysis import analyze_run, compare_runs, render_markdown_summary
 from .core import build_restart_brief, detect_signals, parse_trace
 from .report import write_report
 
@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Print privacy-safe normalized data as JSON")
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
     parser.add_argument("--summary-output", type=Path, help="Write an evidence-backed Markdown run summary")
+    parser.add_argument("--compare", type=Path, metavar="BASELINE", help="Compare this run with a baseline JSON/JSONL trace")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
     parser.add_argument("--open", action="store_true", help="Open the generated report in the default browser")
@@ -39,25 +40,31 @@ def main(argv: list[str] | None = None) -> int:
     try:
         trace = args.trace or newest_codex_session()
         run = parse_trace(trace)
+        baseline = parse_trace(args.compare) if args.compare else None
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
         return 2
     signals = detect_signals(run.events)
     analysis = analyze_run(run)
+    comparison = compare_runs(run, baseline) if baseline else None
+    export = {"run": run.as_dict(), "analysis": analysis, "comparison": comparison}
     if args.json:
-        print(json.dumps({"run": run.as_dict(), "analysis": analysis}, indent=2, ensure_ascii=False))
-    report = write_report(run, args.output)
+        print(json.dumps(export, indent=2, ensure_ascii=False))
+    report = write_report(run, args.output, comparison=comparison)
     print(f"Report: {report.resolve()}")
     counts = analysis["counts"]
     print(f"Source: {trace.resolve()}")
     print(f"Turns: {counts['turns']} · Meaningful events: {counts['events']} · Actions: {counts['actions']} · Failed: {counts['failures']} · Signals: {len(signals)}")
     if analysis["privacy"]["total_findings"]:
         print(f"Privacy: redacted {analysis['privacy']['total_findings']} potential secret occurrence(s) from generated outputs")
+    if comparison:
+        summary = comparison["summary"]
+        print(f"Comparison: {comparison['verdict']} · {summary['regressions']} regression(s) · {summary['improvements']} improvement(s) vs {args.compare.resolve()}")
     if args.normalized_output:
-        args.normalized_output.write_text(json.dumps({"run": run.as_dict(), "analysis": analysis}, indent=2, ensure_ascii=False), encoding="utf-8")
+        args.normalized_output.write_text(json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"Normalized JSON: {args.normalized_output.resolve()}")
     if args.summary_output:
-        args.summary_output.write_text(render_markdown_summary(run), encoding="utf-8")
+        args.summary_output.write_text(render_markdown_summary(run, comparison), encoding="utf-8")
         print(f"Summary: {args.summary_output.resolve()}")
     if args.restart_at:
         try:

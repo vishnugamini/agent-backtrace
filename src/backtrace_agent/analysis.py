@@ -61,7 +61,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
         {"event_id": event.id, "at_ms": event.at_ms, "title": event.title, "detail": _short(event.detail, 260)}
         for event in run.events if event.kind == "message" and event.agent == "codex"
     ]
-    slowest = sorted((event for event in tool_events if event.duration_ms), key=lambda event: event.duration_ms, reverse=True)[:8]
+    slowest = sorted((event for event in tool_events if event.duration_ms and not event.metadata.get("long_running")), key=lambda event: event.duration_ms, reverse=True)[:8]
     operation_counts = Counter(event.operation for event in tool_events if event.operation)
     repeated_operations = [
         {"operation": operation, "count": count}
@@ -77,7 +77,19 @@ def analyze_run(run: Run) -> dict[str, Any]:
     total_tokens = run.tokens.get("total_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
     cache_ratio = round(cached / total_tokens * 100, 1) if total_tokens else None
-    active_ms = sum(event.duration_ms for event in tool_events)
+    active_ms = sum(event.duration_ms for event in tool_events if not event.metadata.get("long_running"))
+    attention_items = []
+    for signal in signals:
+        if signal.kind == "failure":
+            attention_items.append({"priority": "high", "title": "Investigate failed action", "detail": signal.detail, "event_id": signal.event_id})
+        elif signal.kind == "repetition":
+            attention_items.append({"priority": "medium", "title": "Remove repeated work", "detail": signal.detail, "event_id": signal.event_id})
+        elif signal.kind == "stall":
+            attention_items.append({"priority": "medium", "title": "Explain idle time", "detail": signal.detail, "event_id": signal.event_id})
+        elif signal.kind == "slow":
+            attention_items.append({"priority": "low", "title": "Review slow action", "detail": signal.detail, "event_id": signal.event_id})
+    if not evidence:
+        attention_items.append({"priority": "high", "title": "Add completion evidence", "detail": "No successful build, test, push, package, or deployment proof was detected.", "event_id": None})
     return {
         "counts": {
             "events": len(run.events), "turns": len(run.turns), "actions": len(tool_events) + len(file_events),
@@ -96,6 +108,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "signals": [signal.as_dict() for signal in signals],
         "slowest_actions": [{"event_id": event.id, "title": event.title, "duration_ms": event.duration_ms, "operation": event.operation} for event in slowest],
         "completion_evidence": evidence,
+        "attention_items": attention_items[:12],
         "tokens": {**run.tokens, "cache_ratio_percent": cache_ratio},
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
         "privacy": {"redactions": run.privacy_findings, "total_findings": sum(run.privacy_findings.values())},
@@ -103,7 +116,89 @@ def analyze_run(run: Run) -> dict[str, Any]:
     }
 
 
-def render_markdown_summary(run: Run) -> str:
+def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
+    """Compare two runs using normalized metrics and explain every conclusion."""
+    current_analysis = analyze_run(current)
+    baseline_analysis = analyze_run(baseline)
+    ca, ba = current_analysis["counts"], baseline_analysis["counts"]
+    current_turns, baseline_turns = max(1, ca["turns"]), max(1, ba["turns"])
+    current_actions, baseline_actions = max(1, ca["actions"]), max(1, ba["actions"])
+
+    def metric(key: str, label: str, baseline_value: float, current_value: float, preference: str, unit: str = "") -> dict[str, Any]:
+        delta = current_value - baseline_value
+        meaningful_delta = max(abs(baseline_value) * 0.05, 0.01)
+        if abs(delta) < meaningful_delta:
+            outcome = "same"
+        elif preference == "lower":
+            outcome = "improved" if delta < 0 else "regressed"
+        elif preference == "higher":
+            outcome = "improved" if delta > 0 else "regressed"
+        else:
+            outcome = "changed"
+        percent = None if baseline_value == 0 else round(delta / baseline_value * 100, 1)
+        return {
+            "key": key, "label": label, "baseline": round(baseline_value, 2), "current": round(current_value, 2),
+            "delta": round(delta, 2), "delta_percent": percent, "preference": preference, "outcome": outcome, "unit": unit,
+        }
+
+    current_signal_counts = Counter(item["kind"] for item in current_analysis["signals"])
+    baseline_signal_counts = Counter(item["kind"] for item in baseline_analysis["signals"])
+    metrics = [
+        metric("tool_seconds_per_turn", "Measured tool time per turn", baseline_analysis["timing"]["measured_tool_ms"] / baseline_turns / 1000, current_analysis["timing"]["measured_tool_ms"] / current_turns / 1000, "lower", "sec"),
+        metric("actions_per_turn", "Actions per turn", ba["actions"] / baseline_turns, ca["actions"] / current_turns, "neutral"),
+        metric("failures_per_100_actions", "Failures per 100 actions", ba["failures"] / baseline_actions * 100, ca["failures"] / current_actions * 100, "lower"),
+        metric("repetitions_per_turn", "Repeated actions per turn", baseline_signal_counts["repetition"] / baseline_turns, current_signal_counts["repetition"] / current_turns, "lower"),
+        metric("stalls_per_turn", "Stalls per turn", baseline_signal_counts["stall"] / baseline_turns, current_signal_counts["stall"] / current_turns, "lower"),
+        metric("slow_actions_per_100", "Slow actions per 100 actions", baseline_signal_counts["slow"] / baseline_actions * 100, current_signal_counts["slow"] / current_actions * 100, "lower"),
+        metric("verification_per_turn", "Verification evidence per turn", len(baseline_analysis["completion_evidence"]) / baseline_turns, len(current_analysis["completion_evidence"]) / current_turns, "higher"),
+        metric("files_changed", "Unique files changed", ba["files_changed"], ca["files_changed"], "neutral"),
+    ]
+
+    def failed_operations(run: Run) -> set[str]:
+        return {event.operation or event.title for event in run.events if event.status == "error"}
+
+    current_failed, baseline_failed = failed_operations(current), failed_operations(baseline)
+    current_files = {item["path"] for item in current_analysis["files"]}
+    baseline_files = {item["path"] for item in baseline_analysis["files"]}
+    current_operations = {item["operation"]: item["count"] for item in current_analysis["operations"]}
+    baseline_operations = {item["operation"]: item["count"] for item in baseline_analysis["operations"]}
+    operation_deltas = [
+        {"operation": operation, "baseline": baseline_operations.get(operation, 0), "current": current_operations.get(operation, 0), "delta": current_operations.get(operation, 0) - baseline_operations.get(operation, 0)}
+        for operation in sorted(current_operations.keys() | baseline_operations.keys())
+        if current_operations.get(operation, 0) != baseline_operations.get(operation, 0)
+    ]
+    operation_deltas.sort(key=lambda item: (-abs(item["delta"]), item["operation"]))
+    new_failures, resolved_failures = sorted(current_failed - baseline_failed), sorted(baseline_failed - current_failed)
+    regressions = [item for item in metrics if item["outcome"] == "regressed"]
+    improvements = [item for item in metrics if item["outcome"] == "improved"]
+    findings = [
+        *({"kind": "regression", "title": f"New failing operation: {operation}", "detail": "This operation failed in the current run but not in the baseline."} for operation in new_failures),
+        *({"kind": "improvement", "title": f"Resolved failure: {operation}", "detail": "This operation failed in the baseline and did not fail in the current run."} for operation in resolved_failures),
+        *({"kind": item["outcome"], "title": item["label"], "detail": f"{item['baseline']} → {item['current']} {item['unit']} ({item['delta']:+g})."} for item in metrics if item["outcome"] in {"regressed", "improved"}),
+    ]
+    if new_failures or len(regressions) > len(improvements):
+        verdict = "regressed"
+    elif resolved_failures or len(improvements) > len(regressions):
+        verdict = "improved"
+    elif not regressions and not improvements and not new_failures and not resolved_failures:
+        verdict = "unchanged"
+    else:
+        verdict = "mixed"
+    return {
+        "baseline": {"name": baseline.name, "session_id": baseline.session_id, "model": baseline.model},
+        "current": {"name": current.name, "session_id": current.session_id, "model": current.model},
+        "verdict": verdict,
+        "metrics": metrics,
+        "findings": findings,
+        "new_failing_operations": new_failures,
+        "resolved_failing_operations": resolved_failures,
+        "file_scope": {"added": sorted(current_files - baseline_files), "removed": sorted(baseline_files - current_files), "shared": sorted(current_files & baseline_files)},
+        "operation_deltas": operation_deltas,
+        "summary": {"regressions": len(regressions) + len(new_failures), "improvements": len(improvements) + len(resolved_failures)},
+    }
+
+
+def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None) -> str:
     analysis = analyze_run(run)
     counts = analysis["counts"]
     lines = [
@@ -124,4 +219,7 @@ def render_markdown_summary(run: Run) -> str:
     lines.extend([f"- {item['title']}" for item in analysis["completion_evidence"]] or ["- No build, test, push, or deployment evidence was detected."])
     if analysis["privacy"]["total_findings"]:
         lines.extend(["", "## Privacy", f"Backtrace redacted {analysis['privacy']['total_findings']} potential secret occurrence(s) from generated output."])
+    if comparison:
+        lines.extend(["", "## Baseline comparison", f"Verdict: **{comparison['verdict']}** against `{comparison['baseline']['name']}`."])
+        lines.extend([f"- **{item['title']}** ({item['kind']}): {item['detail']}" for item in comparison["findings"]] or ["- No material normalized changes detected."])
     return "\n".join(lines)

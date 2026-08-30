@@ -13,10 +13,10 @@ def _fmt(ms: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def render_html(run: Run) -> str:
+def render_html(run: Run, comparison: dict | None = None) -> str:
     """Return a dependency-free interactive diagnostic report."""
     analysis = analyze_run(run)
-    payload = json.dumps({"run": run.as_dict(), "analysis": analysis, "markdown": render_markdown_summary(run)}, ensure_ascii=False).replace("</", "<\\/")
+    payload = json.dumps({"run": run.as_dict(), "analysis": analysis, "comparison": comparison, "markdown": render_markdown_summary(run, comparison)}, ensure_ascii=False).replace("</", "<\\/")
     counts = analysis["counts"]
     privacy_count = analysis["privacy"]["total_findings"]
     template = r'''<!doctype html>
@@ -56,11 +56,23 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
     for key, value in replacements.items():
         template = template.replace(key, value)
     template = template.replace("FILES TOUCHED", "FILES CHANGED").replace(">Touches<", ">Changes<")
+    attention_panel = '<section class="panel" style="margin-bottom:18px"><div class="kicker">WHAT NEEDS ATTENTION</div><div id="attention"></div></section>'
+    template = template.replace('<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', attention_panel + '<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', 1)
+    comparison_css = '''<style>.comparison-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.compare-metric{border:1px solid var(--line);padding:16px;background:var(--surface)}.compare-metric strong,.compare-metric span{display:block}.compare-metric strong{font:22px Georgia,serif;margin:8px 0}.compare-metric small{color:var(--muted)}.compare-metric.regressed{border-top:4px solid var(--red)}.compare-metric.improved{border-top:4px solid var(--green)}.compare-metric.changed,.compare-metric.same{border-top:4px solid var(--blue)}.verdict{display:inline-block;padding:7px 10px;border-radius:4px;font:800 11px monospace;text-transform:uppercase}.verdict.regressed{background:#fbdfd8;color:#8f2e20}.verdict.improved{background:#dfeee2;color:#17543a}.verdict.mixed,.verdict.unchanged{background:#e8e6dc}.scope-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px}.scope-columns code{display:block;margin:5px 0;font-size:11px}@media(max-width:650px){.scope-columns{grid-template-columns:1fr}}</style>'''
+    template = template.replace("</head>", comparison_css + "</head>")
+    if comparison:
+        tab = '<button class="tab" data-view="compare">Compare <span class="pill __COMPARE_CLASS__">__COMPARE_VERDICT__</span></button>'
+        tab = tab.replace("__COMPARE_CLASS__", "warn" if comparison["verdict"] == "regressed" else "good").replace("__COMPARE_VERDICT__", comparison["verdict"])
+        template = template.replace("</nav>", tab + "</nav>")
+        compare_view = '''<section class="view" id="compare"><section class="panel"><div class="kicker">BASELINE COMPARISON</div><h2>Current run vs <code id="baseline-name"></code></h2><p><span class="verdict" id="compare-verdict"></span> <span id="compare-summary"></span></p><div class="comparison-grid" id="compare-metrics"></div></section><div class="grid"><section class="panel"><div class="kicker">WHAT CHANGED</div><div id="compare-findings"></div></section><section class="panel"><div class="kicker">FILE SCOPE</div><div class="scope-columns"><div><strong>Added to scope</strong><div id="scope-added"></div></div><div><strong>Removed from scope</strong><div id="scope-removed"></div></div></div></section></div><section class="panel" style="margin-top:18px"><div class="kicker">LARGEST OPERATION COUNT CHANGES</div><table><thead><tr><th>Operation</th><th>Baseline</th><th>Current</th><th>Delta</th></tr></thead><tbody id="operation-deltas"></tbody></table></section></section>'''
+        template = template.replace("</main>", compare_view + "</main>")
+    extra_js = r'''const C=D.comparison;$('#attention').innerHTML=A.attention_items.length?A.attention_items.map(x=>`<button class="signal ${x.priority==='high'?'error':x.priority==='medium'?'warning':'info'}" ${x.event_id?`data-event="${x.event_id}"`:''}><span class="signal-icon">${x.priority==='high'?'!':x.priority==='medium'?'↻':'i'}</span><span><strong>${esc(x.title)}</strong><small>${esc(x.detail)}</small></span></button>`).join(''):'<p class="empty">No urgent follow-up detected. Review completion evidence before closing the task.</p>';if(C){$('#baseline-name').textContent=C.baseline.name;$('#compare-verdict').textContent=C.verdict;$('#compare-verdict').className=`verdict ${C.verdict}`;$('#compare-summary').textContent=`${C.summary.regressions} regression(s), ${C.summary.improvements} improvement(s)`;$('#compare-metrics').innerHTML=C.metrics.map(m=>`<article class="compare-metric ${m.outcome}"><span>${esc(m.label)}</span><strong>${m.baseline} → ${m.current} ${esc(m.unit)}</strong><small>${m.outcome}${m.delta_percent===null?'':` · ${m.delta_percent>0?'+':''}${m.delta_percent}%`}</small></article>`).join('');$('#compare-findings').innerHTML=C.findings.length?C.findings.map(x=>`<div class="signal ${x.kind==='regression'?'error':x.kind==='improvement'?'info':'warning'}"><span class="signal-icon">${x.kind==='regression'?'!':x.kind==='improvement'?'✓':'i'}</span><span><strong>${esc(x.title)}</strong><small>${esc(x.detail)}</small></span></div>`).join(''):'<p class="empty">No material normalized changes detected.</p>';const scope=(id,items)=>$(id).innerHTML=items.length?items.map(x=>`<code>${esc(x)}</code>`).join(''):'<p class="empty">None</p>';scope('#scope-added',C.file_scope.added);scope('#scope-removed',C.file_scope.removed);$('#operation-deltas').innerHTML=C.operation_deltas.slice(0,15).map(x=>`<tr><td><code>${esc(x.operation)}</code></td><td>${x.baseline}</td><td>${x.current}</td><td>${x.delta>0?'+':''}${x.delta}</td></tr>`).join('')||'<tr><td colspan="4" class="empty">No operation count changes.</td></tr>'}wireEvents();'''
+    template = template.replace("</script></body>", extra_js + "</script></body>")
     return template
 
 
-def write_report(run: Run, destination: str | Path) -> Path:
+def write_report(run: Run, destination: str | Path, *, comparison: dict | None = None) -> Path:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(render_html(run), encoding="utf-8")
+    destination.write_text(render_html(run, comparison), encoding="utf-8")
     return destination
