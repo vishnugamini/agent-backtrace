@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, asdict
+import re
 from statistics import median
 from typing import Any
 
@@ -51,6 +52,29 @@ def classify_phase(event: Event) -> str:
     if event.kind == "message":
         return "Communicate"
     return "Operate"
+
+
+def classify_side_effect(event: Event) -> dict[str, Any] | None:
+    """Identify consequential actions from explicit operations or shell commands."""
+    if event.kind not in {"tool", "error"}:
+        return None
+    operation = (event.operation or "").casefold()
+    command = event.input.casefold().strip()
+    if "deployment_status" in operation:
+        return None
+    if any(term in operation for term in ("delete", "destroy", "remove")) or re.search(r"(?:^|[;&|]\s*)(?:rm|rmdir|unlink)\s", command):
+        return {"category": "destructive", "label": "Deletion or destructive mutation", "severity": "high", "reversible": False}
+    if any(term in operation for term in ("permission", "access_policy", "share")) or re.search(r"(?:^|[;&|]\s*)(?:chmod|chown)\s", command):
+        return {"category": "access", "label": "Access or permission change", "severity": "high", "reversible": True}
+    if any(term in operation for term in ("git.push", "deploy", "publish", "save_site_version", "release")):
+        return {"category": "publish", "label": "External publish or deployment", "severity": "medium", "reversible": True}
+    if operation == "git.commit" or "git.commit" in operation:
+        return {"category": "repository", "label": "Repository history change", "severity": "low", "reversible": True}
+    if any(term in operation for term in ("send", "comment", "create_issue", "update_issue", "upload", "external_write")):
+        return {"category": "external_write", "label": "External write", "severity": "medium", "reversible": True}
+    if "install" in operation or re.search(r"(?:^|[;&|]\s*)(?:pip|uv|npm|pnpm|yarn|brew)\s+(?:install|add)\b", command):
+        return {"category": "install", "label": "Dependency or software installation", "severity": "medium", "reversible": True}
+    return None
 
 
 def analyze_run(run: Run) -> dict[str, Any]:
@@ -170,6 +194,18 @@ def analyze_run(run: Run) -> dict[str, Any]:
     incidents.sort(key=lambda incident: (incident["status"] == "recovered", incident["started_at_ms"]))
     recovery_times = [incident["time_to_recovery_ms"] for incident in incidents if incident["time_to_recovery_ms"] is not None]
 
+    side_effect_items = []
+    for event in run.events:
+        classification = classify_side_effect(event)
+        if not classification:
+            continue
+        side_effect_items.append({
+            "event_id": event.id, "at_ms": event.at_ms, "operation": event.operation or event.title,
+            "title": event.title, "detail": _short(event.detail, 240), "status": event.status,
+            "files": event.files, **classification,
+        })
+    side_effect_categories = Counter(item["category"] for item in side_effect_items)
+
     total_tokens = run.tokens.get("total_tokens", 0)
     input_tokens = run.tokens.get("input_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
@@ -226,6 +262,14 @@ def analyze_run(run: Run) -> dict[str, Any]:
             "recovered": sum(incident["status"] == "recovered" for incident in incidents),
             "unresolved": sum(incident["status"] == "unresolved" for incident in incidents),
             "median_recovery_ms": round(median(recovery_times)) if recovery_times else None,
+        },
+        "side_effects": {
+            "items": side_effect_items,
+            "total": len(side_effect_items),
+            "successful": sum(item["status"] == "ok" for item in side_effect_items),
+            "failed": sum(item["status"] == "error" for item in side_effect_items),
+            "destructive_attempts": side_effect_categories["destructive"],
+            "categories": [{"category": category, "count": count} for category, count in side_effect_categories.most_common()],
         },
         "tokens": {
             **run.tokens,
@@ -356,6 +400,10 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
         limit = int(policy["max_unresolved_failures"])
         actual = analysis["incidents"]["unresolved"]
         add("max_unresolved_failures", "Unresolved failure incidents", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} operation-level failure incident(s) without later successful recovery evidence.")
+    if policy.get("max_destructive_actions") is not None:
+        limit = int(policy["max_destructive_actions"])
+        actual = analysis["side_effects"]["destructive_attempts"]
+        add("max_destructive_actions", "Destructive action attempts", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} explicit deletion or destructive-mutation attempt(s), including failed attempts.")
     if policy.get("max_repetitions") is not None:
         limit = int(policy["max_repetitions"])
         actual = signal_counts["repetition"]
@@ -432,6 +480,12 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
         + (f"recovered after {round(incident['time_to_recovery_ms']/1000, 1)}s" if incident["status"] == "recovered" else "no later successful operation recorded")
         for incident in incidents["items"]
     ] or ["- No failure incidents detected."])
+    side_effects = analysis["side_effects"]
+    lines.extend(["", "## Side-effect ledger", f"Consequential actions: **{side_effects['total']}** ({side_effects['successful']} successful, {side_effects['failed']} failed); destructive attempts: **{side_effects['destructive_attempts']}**."])
+    lines.extend([
+        f"- **{item['label']}** — `{item['operation']}` ({item['status']}): {item['detail']}"
+        for item in side_effects["items"]
+    ] or ["- No explicit side effects detected."])
     lines.extend(["", "## Diagnostic signals"])
     lines.extend([f"- **{signal['title']}** ({signal['severity']}): {signal['detail']}" for signal in analysis["signals"]] or ["- None detected."])
     lines.extend(["", "## Files changed"])

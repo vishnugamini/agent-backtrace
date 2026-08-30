@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
 from backtrace_agent.cli import main
-from backtrace_agent.core import build_restart_brief, detect_signals, parse_trace, suppress_content
+from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
 
 
@@ -171,11 +171,32 @@ def test_missing_token_counters_are_explicit_and_do_not_create_empty_view(tmp_pa
     assert 'data-view="tokens"' not in render_html(run)
 
 
+def test_side_effect_ledger_and_destructive_gate_are_explicit():
+    destructive = Event("remove-1", 0, "builder", "tool", "Remove cache", "rm cache.db", operation="shell.rm", input="rm cache.db")
+    publish = Event("push-1", 1000, "builder", "tool", "Push branch", "origin/main", operation="git.push")
+    harmless = Event("read-1", 2000, "builder", "tool", "Read file", "README", operation="file.read", input="echo rm cache.db")
+    status_check = Event("status-1", 3000, "builder", "tool", "Check deployment", "succeeded", operation="sites.get_deployment_status")
+    assert classify_side_effect(destructive)["category"] == "destructive"
+    assert classify_side_effect(publish)["category"] == "publish"
+    assert classify_side_effect(harmless) is None
+    assert classify_side_effect(status_check) is None
+    run = Run("effects", "test", [destructive, publish, harmless])
+    analysis = analyze_run(run)
+    assert analysis["side_effects"]["total"] == 2
+    assert analysis["side_effects"]["destructive_attempts"] == 1
+    assert evaluate_policy(run, {"max_destructive_actions": 0})["passed"] is False
+    report = render_html(run)
+    assert 'data-view="effects"' in report
+    assert "CONSEQUENTIAL ACTION LEDGER" in report
+
+
 def test_cli_quality_gate_controls_exit_status(tmp_path):
     trace = generic_trace(tmp_path)
     assert main([str(trace), "--output", str(tmp_path / "failed.html"), "--max-failures", "0"]) == 1
     assert main([str(trace), "--output", str(tmp_path / "passed.html"), "--max-failures", "1"]) == 0
     assert main([str(trace), "--output", str(tmp_path / "unresolved.html"), "--max-unresolved-failures", "0"]) == 1
+    destructive = write_jsonl(tmp_path, [{"timestamp": "2026-08-29T12:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "rm cache.db"}}], "destructive.jsonl")
+    assert main([str(destructive), "--output", str(tmp_path / "destructive.html"), "--max-destructive-actions", "0"]) == 1
 
 
 def test_restart_brief_is_checkpointed_and_redacted(tmp_path):
