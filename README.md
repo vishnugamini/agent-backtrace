@@ -2,7 +2,7 @@
 
 ![Backtrace — See where your agent changed course](public/og.png)
 
-**A local-first Python flight recorder for AI coding agents.** Turn raw Codex, Claude Code, and custom-agent JSON/JSONL logs into an interactive timeline, diagnostics, and a restart brief from any checkpoint.
+**A local-first Python flight recorder for AI coding agents.** Turn a raw Codex or custom-agent JSONL log into a concise, evidence-backed account of what the agent attempted, changed, failed, recovered from, and actually finished.
 
 [Try the interactive demo](https://agent-backtrace.disastrousyellow.chatgpt.site) · [Open an issue](https://github.com/vishnugamini/agent-backtrace/issues)
 
@@ -12,12 +12,12 @@ Agent runs are increasingly long, parallel, and hard to supervise. A chat transc
 
 Backtrace focuses on the gap between **viewing a log** and **recovering from it**:
 
-- Normalize loose vendor trace formats into one small event model.
-- Put each agent on its own time track.
-- Flag repeated actions, failed steps, and long idle gaps.
-- Extract touched file paths.
+- Collapse Codex bookkeeping into meaningful user, reasoning, tool, file, and subagent events.
+- Reconstruct turns, commands, durations, exit codes, changed files, and reported outcomes.
+- Flag repeated actions, failed steps, recoveries, slow actions, and unexplained stalls.
+- Separate files actually changed from paths merely mentioned in command output.
 - Build a secret-redacted restart brief at any checkpoint.
-- Generate one dependency-free HTML file that stays on your machine.
+- Export a dependency-free HTML report, sanitized JSON, and an evidence-backed Markdown summary.
 
 ## Quick start
 
@@ -28,8 +28,16 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-backtrace-agent examples/demo.jsonl -o report.html
+backtrace-agent  # automatically analyzes your newest local Codex session
 open report.html  # macOS; use xdg-open on Linux
+```
+
+Or pass any JSON/JSONL trace explicitly:
+
+```bash
+backtrace-agent examples/demo.jsonl -o report.html \
+  --summary-output summary.md \
+  --normalized-output normalized.json
 ```
 
 Create a restart brief from a specific normalized event:
@@ -51,10 +59,11 @@ backtrace-agent examples/demo.jsonl --json > normalized.json
 
 The generated HTML report is self-contained: no server, database, API key, CDN, or tracking script. Open it in any modern browser and:
 
-1. Filter tool calls, files, failures, and handoffs.
-2. Select any event to inspect its normalized payload.
-3. Jump from detected signals to the relevant step.
-4. Copy or download a restart brief for the selected checkpoint.
+1. Start from the objective, turn outcomes, completion evidence, and run-level counts.
+2. Filter and search the meaningful timeline by kind, status, or user turn.
+3. Inspect exact commands, sanitized output, duration, exit code, and related files.
+4. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
+5. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
 
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 
@@ -68,7 +77,7 @@ Backtrace deliberately uses a tolerant parser. It accepts:
 - OpenAI/Codex-style `{timestamp, type, payload}` records
 - Generic records with common fields such as `agent`, `role`, `name`, `content`, `arguments`, `output`, or `message`
 
-Unknown fields remain attached to the normalized event as `raw`, so adapters can become more precise without losing source data.
+For Codex sessions, Backtrace deliberately uses canonical completed items and ignores duplicated low-level transport and token bookkeeping records. Raw provider payloads are never embedded in generated reports or normalized exports because they can contain credentials, system prompts, and private source code.
 
 ```json
 {"timestamp":"2026-08-29T12:00:27Z","type":"response_item","payload":{"type":"function_call","agent_name":"builder","name":"exec_command","arguments":"pytest"}}
@@ -93,15 +102,17 @@ The first release keeps diagnostics explainable:
 
 | Signal | Default rule |
 | --- | --- |
-| Possible loop | Same agent + normalized title appears 3 times within 3 minutes |
-| Failed step | Event type, tool name, or payload contains an explicit error/failure marker |
-| Long idle gap | More than 3 minutes between consecutive events |
+| Repeated action | Same agent, operation, and input occurs 3 times within 10 minutes |
+| Failed action | Explicit failure/cancellation status or non-zero command exit code |
+| Recovery | A later successful action has the same operation as an earlier failure |
+| Idle gap | More than 3 minutes between events inside the same user turn |
+| Slow action | A measured tool action takes at least 60 seconds |
 
 These are useful heuristics, not claims about agent intent. The source event is always linked so a human can decide.
 
 ## Privacy and safety
 
-Agent logs can contain prompts, source code, local paths, command output, and credentials. Backtrace processes files locally and its generated report has no network dependencies. Restart briefs redact common OpenAI and GitHub token patterns plus obvious `token=`, `password=`, `secret=`, and `api_key=` assignments.
+Agent logs can contain prompts, source code, local paths, command output, and credentials. Backtrace processes files locally and its generated report has no network dependencies. Every generated artifact excludes raw provider payloads and redacts common OpenAI, GitHub, Sites, AWS, bearer-token, private-key, and named-secret patterns by default.
 
 Redaction is defense-in-depth, not a guarantee. Review any trace or restart brief before sharing it.
 
@@ -135,7 +146,7 @@ app/ + lib/            Interactive demo
 
 ## Roadmap
 
-- First-class adapters for evolving Codex and Claude Code session schemas
+- First-class Claude Code and OpenTelemetry adapters
 - Trace-to-trace comparison for regressions
 - User-defined signal rules
 - Optional live tailing of active sessions

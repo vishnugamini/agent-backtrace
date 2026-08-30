@@ -42,7 +42,7 @@ export default function Home() {
     try {
       const parsed = parseTrace(await file.text(), file.name);
       setRun(parsed); setSelectedId(parsed.events.at(-1)!.id); setPlayhead(100); setFilter("all");
-      setNotice(`${parsed.events.length} events imported locally`);
+      setNotice(`${parsed.events.length} meaningful events imported locally${parsed.ignored ? ` · ${parsed.ignored} bookkeeping records ignored` : ""}${parsed.privacyFindings ? ` · ${parsed.privacyFindings} potential secrets redacted` : ""}`);
       document.getElementById("workspace")?.scrollIntoView({ behavior: "smooth" });
     } catch (error) { setNotice(error instanceof Error ? error.message : "Could not read that trace"); }
   }
@@ -72,7 +72,7 @@ export default function Home() {
       <section className="workspace" id="workspace">
         <div className="workspaceHead">
           <div><span className="liveDot" /> {run.source.toUpperCase()}<h2>{run.name}</h2><p className="notice">{notice}</p></div>
-          <div className="metrics"><div><strong>{formatTime(duration)}</strong><span>DURATION</span></div><div><strong>{agents.length}</strong><span>AGENTS</span></div><div><strong>{run.events.filter((event) => event.kind === "tool").length}</strong><span>TOOL CALLS</span></div><div className={signals.length ? "warning" : ""}><strong>{signals.length}</strong><span>SIGNALS</span></div></div>
+          <div className="metrics"><div><strong>{formatTime(duration)}</strong><span>DURATION</span></div><div><strong>{run.events.length}</strong><span>MEANINGFUL EVENTS</span></div><div><strong>{run.events.filter((event) => event.kind === "file").flatMap((event) => event.files ?? []).filter((file, index, all) => all.indexOf(file) === index).length}</strong><span>FILES CHANGED</span></div><div className={signals.length ? "warning" : ""}><strong>{signals.length}</strong><span>SIGNALS</span></div></div>
         </div>
 
         <div className="tracePanel">

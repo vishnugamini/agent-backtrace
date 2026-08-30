@@ -10,18 +10,28 @@ export type TraceEvent = {
   raw?: unknown;
   files?: string[];
   status?: "ok" | "warning" | "error";
+  duration?: number;
+  operation?: string;
+  input?: string;
+  output?: string;
+  turnId?: string;
 };
 
 export type TraceRun = {
   name: string;
   source: string;
   events: TraceEvent[];
+  ignored?: number;
+  privacyFindings?: number;
+  model?: string;
 };
 
 const filePattern = /(?:^|[\s"'`(])((?:\.?\.?\/|\/)?(?:[\w@.-]+\/)+[\w@.+-]+\.[a-zA-Z0-9]{1,8})(?=$|[\s"'`),:])/g;
 const secretPatterns = [
   [/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_API_KEY]"],
   [/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]"],
+  [/\bart_v\d+_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED_SITE_CREDENTIAL]"],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi, "Bearer [REDACTED]"],
   [/(?:api[_-]?key|token|secret|password)(\s*[=:]\s*)["']?(?!\[REDACTED)[^\s,"']{8,}/gi, "$1[REDACTED]"],
 ] as const;
 
@@ -66,8 +76,8 @@ function classify(type: string, payload: Record<string, unknown>, detail: string
   if (/error|failed|failure|exception/.test(lower)) return "error";
   if (/handoff|delegate|subagent|spawn_agent/.test(lower)) return "handoff";
   if (/patch|edit|write_file|create_file|file_change/.test(lower)) return "file";
-  if (/tool|function_call|command|exec|search|browser|mcp/.test(lower)) return "tool";
   if (/function_call_output|tool_result|command_output|result/.test(lower)) return "result";
+  if (/tool|function_call|command|exec|search|browser|mcp/.test(lower)) return "tool";
   if (/reason|thinking|analysis/.test(lower)) return "reasoning";
   return "message";
 }
@@ -97,6 +107,10 @@ export function parseTrace(input: string, fileName = "imported trace"): TraceRun
   }
   if (!records.length) throw new Error("No readable JSON or JSONL events were found.");
 
+  const codexRecords = records.filter((item) => item && typeof item === "object") as Record<string, unknown>[];
+  const isCodex = codexRecords.some((record) => record.type === "event_msg" && (record.payload as Record<string, unknown> | undefined)?.type === "item_completed");
+  if (isCodex) return parseCodexTrace(codexRecords, fileName, input);
+
   const rawFirst = records.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
   const firstCandidate = rawFirst?.timestamp ?? rawFirst?.created_at ?? rawFirst?.time ?? rawFirst?.ts;
   const parsedFirst = typeof firstCandidate === "number" ? firstCandidate : Date.parse(String(firstCandidate ?? ""));
@@ -114,7 +128,7 @@ export function parseTrace(input: string, fileName = "imported trace"): TraceRun
       .replace(/assistant|model/i, "primary");
     const status = kind === "error" ? "error" : /warn|retry|timeout/i.test(detail) ? "warning" : "ok";
     return [{
-      id: `evt-${index}-${Math.random().toString(36).slice(2, 7)}`,
+      id: `evt-${String(index + 1).padStart(4, "0")}`,
       at: getTimestamp(record, index, first),
       agent,
       kind,
@@ -127,6 +141,87 @@ export function parseTrace(input: string, fileName = "imported trace"): TraceRun
   });
   if (!events.length) throw new Error("The file was valid JSON, but contained no event objects.");
   return { name: fileName.replace(/\.(jsonl?|txt)$/i, ""), source: "Local import", events };
+}
+
+function recordPayload(record: Record<string, unknown>): Record<string, unknown> {
+  return record.payload && typeof record.payload === "object" ? record.payload as Record<string, unknown> : {};
+}
+
+function itemStatus(item: Record<string, unknown>): "ok" | "warning" | "error" {
+  const status = String(item.status ?? "completed").toLowerCase();
+  if (["failed", "error", "cancelled"].includes(status) || (typeof item.exit_code === "number" && item.exit_code !== 0)) return "error";
+  if (["pending", "running", "in_progress"].includes(status)) return "warning";
+  return "ok";
+}
+
+function commandText(item: Record<string, unknown>): string {
+  const command = item.command;
+  if (Array.isArray(command) && command.length >= 3 && ["-lc", "-c"].includes(String(command[1]))) return String(command[2]);
+  return Array.isArray(command) ? command.map(String).join(" ") : String(command ?? "");
+}
+
+function commandLabel(command: string): [string, string] {
+  const lower = command.toLowerCase();
+  if (/\bpytest\b|\bnpm (run )?test\b/.test(lower)) return ["Ran test suite", "test"];
+  if (/\bnpm run build\b/.test(lower)) return ["Built project", "build"];
+  if (/\bnpm run lint\b/.test(lower)) return ["Ran linter", "lint"];
+  if (/\bgit push\b/.test(lower)) return ["Pushed changes", "git.push"];
+  if (/\bgit commit\b/.test(lower)) return ["Committed changes", "git.commit"];
+  if (/package-site\.sh/.test(lower)) return ["Packaged Site", "site.package"];
+  const executable = command.trim().split(/\s+/)[0]?.split("/").at(-1) || "command";
+  return [`Ran ${executable}`, `shell.${executable}`];
+}
+
+function parseCodexTrace(records: Record<string, unknown>[], fileName: string, raw: string): TraceRun {
+  const context = records.find((record) => record.type === "turn_context");
+  const contextPayload = context ? recordPayload(context) : {};
+  const completed = records.filter((record) => record.type === "event_msg" && recordPayload(record).type === "item_completed");
+  const starts = completed.map((record) => Number(recordPayload(record).started_at_ms)).filter(Number.isFinite);
+  const first = Math.min(...starts);
+  const events = completed.flatMap((record, index): TraceEvent[] => {
+    const payload = recordPayload(record);
+    const item = payload.item && typeof payload.item === "object" ? payload.item as Record<string, unknown> : {};
+    const itemType = String(item.type ?? "");
+    const at = Math.max(0, Number(payload.started_at_ms ?? first) - first);
+    const duration = Math.max(0, Number(payload.completed_at_ms ?? payload.started_at_ms ?? first) - Number(payload.started_at_ms ?? first));
+    const status = itemStatus(item);
+    const base = { id: String(item.id ?? `evt-${index + 1}`), at, duration, status, agent: "codex", turnId: String(payload.turn_id ?? "") };
+    if (itemType === "UserMessage") {
+      const detail = redactSecrets(text(item.content).replace(/<in-app-browser-context\b[^>]*>[\s\S]*?<\/in-app-browser-context>/gi, "").replace(/^\s*##\s*My request:\s*/i, "").trim());
+      return [{ ...base, agent: "user", kind: "message", title: compact(detail, 72) || "User request", detail }];
+    }
+    if (itemType === "AgentMessage") {
+      const detail = redactSecrets(text(item.content));
+      return [{ ...base, kind: "message", title: item.phase === "final" ? "Final response" : "Progress update", detail }];
+    }
+    if (itemType === "Reasoning") {
+      const detail = redactSecrets(text(item.summary_text).replaceAll("**", ""));
+      return detail ? [{ ...base, kind: "reasoning", title: compact(detail, 90), detail }] : [];
+    }
+    if (itemType === "CommandExecution") {
+      const command = commandText(item); const [title, operation] = commandLabel(command);
+      const output = redactSecrets([text(item.stdout), text(item.stderr)].filter(Boolean).join("\n"));
+      return [{ ...base, kind: status === "error" ? "error" : "tool", title, operation, detail: compact(`${redactSecrets(command)}\n${output}`, 520), input: redactSecrets(command), output, files: getFiles(command) }];
+    }
+    if (itemType === "FileChange") {
+      const changes = item.changes && typeof item.changes === "object" ? item.changes as Record<string, unknown> : {};
+      const files = Object.keys(changes).map((path) => String(contextPayload.cwd) && path.startsWith(`${contextPayload.cwd}/`) ? path.slice(String(contextPayload.cwd).length + 1) : path);
+      return [{ ...base, kind: "file", title: `Changed ${files.length} file${files.length === 1 ? "" : "s"}`, operation: "file.change", detail: files.join("\n"), files }];
+    }
+    if (["McpToolCall", "DynamicToolCall", "Extension"].includes(itemType)) {
+      const operation = itemType === "Extension" ? String(item.kind ?? "extension") : `${String(item.server ?? item.namespace ?? "tool")}.${String(item.tool ?? "call")}`;
+      const output = redactSecrets(text(item.result ?? item.content_items ?? item.results ?? ""));
+      const label = operation.split(".").at(-1)?.replaceAll("_", " ") || "tool call";
+      return [{ ...base, kind: status === "error" ? "error" : "tool", title: label[0].toUpperCase() + label.slice(1), operation, detail: compact(output || text(item.arguments ?? item.query), 520), input: redactSecrets(text(item.arguments ?? item.query)), output, files: getFiles({ arguments: item.arguments, result: item.result }) }];
+    }
+    if (itemType === "SubAgentActivity") return [{ ...base, kind: "handoff", title: `${String(item.kind ?? "activity")} subagent`, operation: `subagent.${String(item.kind ?? "activity")}`, detail: `Agent: ${String(item.agent_path ?? "unknown")}` }];
+    return [];
+  });
+  return {
+    name: fileName.replace(/\.(jsonl?|txt)$/i, ""), source: "Codex session", events,
+    ignored: records.length - events.length, model: String(contextPayload.model ?? "") || undefined,
+    privacyFindings: secretPatterns.reduce((count, [pattern]) => count + (raw.match(new RegExp(pattern.source, pattern.flags))?.length ?? 0), 0),
+  };
 }
 
 export function detectSignals(events: TraceEvent[]) {
