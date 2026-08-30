@@ -73,6 +73,32 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         cards = "".join(f'<article class="compare-metric"><span>{html.escape(label)}</span><strong>{html.escape(f"{value:,}" if isinstance(value, int) else str(value))} {unit}</strong></article>' for label, value, unit in token_cards)
         token_view = f'<section class="view" id="tokens"><section class="panel"><div class="kicker">TOKEN ECONOMICS</div><h2>Where the recorded context went</h2><p class="objective">These are cumulative counters recovered from the trace, normalized where useful. They are not price or billing estimates.</p><div class="comparison-grid">{cards}</div></section></section>'
         template = template.replace("</main>", token_view + "</main>")
+    workflow = analysis["workflow"]
+    if workflow["phases"]:
+        template = template.replace("</nav>", '<button class="tab" data-view="workflow">Workflow</button></nav>')
+        max_actions = max(1, *(phase["actions"] for phase in workflow["phases"]))
+        phase_cards = "".join(
+            f'<button class="phase-card phase-{phase["name"].casefold()}" data-event="{html.escape(phase["first_event_id"])}">'
+            f'<span class="phase-index">{index:02d}</span><span class="phase-name">{html.escape(phase["name"])}</span>'
+            f'<span class="phase-bar"><i style="width:{phase["actions"] / max_actions * 100:.1f}%"></i></span>'
+            f'<span class="phase-stats"><b>{phase["actions"]}</b> actions · <b>{_fmt(phase["measured_ms"])}</b> measured · '
+            f'<b>{phase["failures"]}</b> failed · <b>{len(phase["files"])}</b> files</span></button>'
+            for index, phase in enumerate(workflow["phases"], 1)
+        )
+        transitions = "".join(
+            f'<tr><td><span class="phase-label">{html.escape(item["from"])}</span></td><td>→</td><td><span class="phase-label">{html.escape(item["to"])}</span></td><td>{item["count"]}</td></tr>'
+            for item in workflow["transitions"][:12]
+        ) or '<tr><td colspan="4" class="empty">No cross-phase action transitions detected.</td></tr>'
+        workflow_view = (
+            '<section class="view" id="workflow"><section class="panel"><div class="kicker">RECONSTRUCTED WORKFLOW</div>'
+            '<h2>How the run moved from intent to outcome</h2><p class="objective">Phase labels are inferred from recorded event types and operations. '
+            f'The largest measured work phase was <strong>{html.escape(workflow["dominant_phase"] or "unavailable")}</strong>; '
+            f'the latest action is classified as <strong>{html.escape(workflow["current_phase"] or "unavailable")}</strong>.</p>'
+            f'<div class="phase-flow">{phase_cards}</div></section><section class="panel" style="margin-top:18px">'
+            '<div class="kicker">MOST COMMON PHASE TRANSITIONS</div><table><thead><tr><th>From</th><th></th><th>To</th><th>Count</th></tr></thead>'
+            f'<tbody>{transitions}</tbody></table></section></section>'
+        )
+        template = template.replace("</main>", workflow_view + "</main>")
     if quality_gate and quality_gate["configured"]:
         gate_class = "good" if quality_gate["passed"] else "warn"
         gate_label = "PASS" if quality_gate["passed"] else "FAIL"
@@ -85,7 +111,7 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         template = template.replace('<section class="view active" id="overview">', '<section class="view active" id="overview">' + gate_panel, 1)
     attention_panel = '<section class="panel" style="margin-bottom:18px"><div class="kicker">WHAT NEEDS ATTENTION</div><div id="attention"></div></section>'
     template = template.replace('<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', attention_panel + '<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', 1)
-    comparison_css = '''<style>.comparison-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.compare-metric{border:1px solid var(--line);padding:16px;background:var(--surface)}.compare-metric strong,.compare-metric span{display:block}.compare-metric strong{font:22px Georgia,serif;margin:8px 0}.compare-metric small{color:var(--muted)}.compare-metric.regressed{border-top:4px solid var(--red)}.compare-metric.improved{border-top:4px solid var(--green)}.compare-metric.changed,.compare-metric.same{border-top:4px solid var(--blue)}.verdict{display:inline-block;padding:7px 10px;border-radius:4px;font:800 11px monospace;text-transform:uppercase}.verdict.regressed{background:#fbdfd8;color:#8f2e20}.verdict.improved{background:#dfeee2;color:#17543a}.verdict.mixed,.verdict.unchanged{background:#e8e6dc}.scope-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px}.scope-columns code{display:block;margin:5px 0;font-size:11px}@media(max-width:650px){.scope-columns{grid-template-columns:1fr}}</style>'''
+    comparison_css = '''<style>.comparison-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.compare-metric{border:1px solid var(--line);padding:16px;background:var(--surface)}.compare-metric strong,.compare-metric span{display:block}.compare-metric strong{font:22px Georgia,serif;margin:8px 0}.compare-metric small{color:var(--muted)}.compare-metric.regressed{border-top:4px solid var(--red)}.compare-metric.improved{border-top:4px solid var(--green)}.compare-metric.changed,.compare-metric.same{border-top:4px solid var(--blue)}.verdict{display:inline-block;padding:7px 10px;border-radius:4px;font:800 11px monospace;text-transform:uppercase}.verdict.regressed{background:#fbdfd8;color:#8f2e20}.verdict.improved{background:#dfeee2;color:#17543a}.verdict.mixed,.verdict.unchanged{background:#e8e6dc}.scope-columns{display:grid;grid-template-columns:1fr 1fr;gap:18px}.scope-columns code{display:block;margin:5px 0;font-size:11px}.phase-flow{display:grid;gap:10px;margin-top:22px}.phase-card{display:grid;grid-template-columns:42px minmax(110px,.45fr) minmax(160px,1fr) minmax(250px,1.2fr);gap:14px;align-items:center;border:1px solid var(--line);background:#faf8f1;padding:14px;text-align:left;cursor:pointer}.phase-card:hover{background:#eef2e9;border-color:#8ca997}.phase-index{font:10px monospace;color:var(--muted)}.phase-name{font:700 19px Georgia,serif}.phase-bar{height:9px;border-radius:9px;background:#e1e0d7;overflow:hidden}.phase-bar i{display:block;height:100%;min-width:3px;background:var(--green)}.phase-stats{font:10px monospace;color:var(--muted)}.phase-stats b{color:var(--ink)}.phase-label{font:700 12px monospace;color:var(--green)}@media(max-width:650px){.scope-columns{grid-template-columns:1fr}.phase-card{grid-template-columns:35px 1fr}.phase-bar,.phase-stats{grid-column:2}}</style>'''
     template = template.replace("</head>", comparison_css + "</head>")
     if comparison:
         tab = '<button class="tab" data-view="compare">Compare <span class="pill __COMPARE_CLASS__">__COMPARE_VERDICT__</span></button>'

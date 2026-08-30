@@ -26,6 +26,32 @@ def _short(value: str, length: int = 180) -> str:
     return value if len(value) <= length else value[:length] + "…"
 
 
+PHASE_ORDER = ["Understand", "Inspect", "Implement", "Verify", "Publish", "Coordinate", "Communicate", "Operate"]
+
+
+def classify_phase(event: Event) -> str:
+    """Map an event to an explainable workflow phase using only recorded evidence."""
+    operation = (event.operation or "").casefold()
+    evidence = f"{operation} {event.title}".casefold()
+    if event.kind == "handoff":
+        return "Coordinate"
+    if "deployment_status" in evidence:
+        return "Verify"
+    if any(term in evidence for term in ("git.push", "git.commit", "deploy", "save_site_version", "create_source_repository", "site.package", "release", "publish")):
+        return "Publish"
+    if any(term in evidence for term in ("test", "lint", "build", "check", "verify", "validate")):
+        return "Verify"
+    if event.kind == "file" or any(term in evidence for term in ("edit", "write", "patch", "file.change", "mkdir", "init-site")):
+        return "Implement"
+    if any(term in evidence for term in ("inspect", "read", "search", "find", "list", "shell.ls", "get_site", "git.inspect")):
+        return "Inspect"
+    if event.kind == "reasoning" or event.agent == "user":
+        return "Understand"
+    if event.kind == "message":
+        return "Communicate"
+    return "Operate"
+
+
 def analyze_run(run: Run) -> dict[str, Any]:
     """Compute factual, explainable run-level diagnostics."""
     signals = detect_signals(run.events)
@@ -74,6 +100,34 @@ def analyze_run(run: Run) -> dict[str, Any]:
         if operation in {"test", "build", "lint", "git.push", "site.package"} or deployment_succeeded:
             evidence.append({"event_id": event.id, "title": event.title, "at_ms": event.at_ms})
 
+    phase_events: dict[str, list[Event]] = defaultdict(list)
+    for event in run.events:
+        phase_events[classify_phase(event)].append(event)
+    workflow_phases = []
+    for name in PHASE_ORDER:
+        events = phase_events.get(name, [])
+        if not events:
+            continue
+        action_events = [event for event in events if event.kind in {"tool", "file", "handoff", "error"}]
+        phase_files = sorted({path for event in events for path in event.files})
+        workflow_phases.append({
+            "name": name,
+            "events": len(events),
+            "actions": len(action_events),
+            "failures": sum(event.status == "error" for event in events),
+            "measured_ms": sum(event.duration_ms for event in action_events if not event.metadata.get("long_running")),
+            "files": phase_files,
+            "first_at_ms": min(event.at_ms for event in events),
+            "last_at_ms": max(event.at_ms + event.duration_ms for event in events),
+            "first_event_id": events[0].id,
+        })
+    classified_actions = [(classify_phase(event), event) for event in run.events if event.kind in {"tool", "file", "handoff", "error"}]
+    transition_counts: Counter[tuple[str, str]] = Counter()
+    for (before, _), (after, _) in zip(classified_actions, classified_actions[1:]):
+        if before != after:
+            transition_counts[(before, after)] += 1
+    dominant_phase = max(workflow_phases, key=lambda phase: (phase["measured_ms"], phase["actions"]), default=None)
+
     total_tokens = run.tokens.get("total_tokens", 0)
     input_tokens = run.tokens.get("input_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
@@ -114,6 +168,16 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "slowest_actions": [{"event_id": event.id, "title": event.title, "duration_ms": event.duration_ms, "operation": event.operation} for event in slowest],
         "completion_evidence": evidence,
         "attention_items": attention_items[:12],
+        "workflow": {
+            "phases": workflow_phases,
+            "transitions": [
+                {"from": before, "to": after, "count": count}
+                for (before, after), count in transition_counts.most_common()
+            ],
+            "dominant_phase": dominant_phase["name"] if dominant_phase else None,
+            "current_phase": classified_actions[-1][0] if classified_actions else None,
+            "current_event_id": classified_actions[-1][1].id if classified_actions else None,
+        },
         "tokens": {
             **run.tokens,
             "uncached_input_tokens": max(0, input_tokens - cached),
@@ -294,7 +358,20 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
     ]
     for turn in analysis["turns"]:
         lines.extend([f"### {turn['request'] or 'Turn without recovered request'}", f"- Duration: {round(turn['duration_ms']/1000, 1)}s", f"- Actions: {turn['actions']}", f"- Files changed: {turn['files_changed']}", f"- Failures: {turn['failures']}", f"- Outcome: {turn['final_response'] or 'No final response recorded.'}", ""])
-    lines.append("## Diagnostic signals")
+    workflow = analysis["workflow"]
+    lines.extend(["## Reconstructed workflow", f"Largest measured phase: **{workflow['dominant_phase'] or 'unavailable'}**. Latest action phase: **{workflow['current_phase'] or 'unavailable'}**."])
+    lines.extend([
+        f"- **{phase['name']}** — {phase['actions']} actions, {round(phase['measured_ms']/1000, 1)}s measured, {phase['failures']} failed, {len(phase['files'])} files"
+        for phase in workflow["phases"]
+    ] or ["- No phase evidence recovered."])
+    token_stats = analysis["tokens"]
+    if token_stats.get("total_tokens"):
+        lines.extend([
+            "", "## Token economics",
+            f"Recorded cumulative tokens: **{token_stats['total_tokens']:,}**; {token_stats['tokens_per_action']:,} per meaningful action; {token_stats['input_cache_ratio_percent']}% input-cache ratio.",
+            "These are trace counters, not billing or price estimates.",
+        ])
+    lines.extend(["", "## Diagnostic signals"])
     lines.extend([f"- **{signal['title']}** ({signal['severity']}): {signal['detail']}" for signal in analysis["signals"]] or ["- None detected."])
     lines.extend(["", "## Files changed"])
     lines.extend([f"- `{item['path']}` — {item['changes']} change event(s), +{item['additions']} −{item['deletions']}" for item in analysis["files"]] or ["- None detected."])

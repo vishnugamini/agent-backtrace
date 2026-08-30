@@ -15,6 +15,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Collapse Codex bookkeeping into meaningful user, reasoning, tool, file, and subagent events.
 - Reconstruct turns, commands, durations, exit codes, changed files, and reported outcomes.
 - Flag repeated actions, failed steps, recoveries, slow actions, and unexplained stalls.
+- Reconstruct the run into understandable workflow phases and show how the agent moved between them.
 - Separate files actually changed from paths merely mentioned in command output.
 - Build a secret-redacted restart brief at any checkpoint.
 - Export a dependency-free HTML report, sanitized JSON, and an evidence-backed Markdown summary.
@@ -107,11 +108,12 @@ backtrace-agent examples/demo.jsonl --json > normalized.json
 The generated HTML report is self-contained: no server, database, API key, CDN, or tracking script. Open it in any modern browser and:
 
 1. Start from the objective, turn outcomes, completion evidence, and run-level counts.
-2. Filter and search the meaningful timeline by kind, status, or user turn.
-3. Inspect exact commands, sanitized output, duration, exit code, and related files.
-4. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
-5. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
-6. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
+2. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
+3. Filter and search the meaningful timeline by kind, status, or user turn.
+4. Inspect exact commands, sanitized output, duration, exit code, and related files.
+5. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
+6. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
+7. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
 
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 

@@ -80,6 +80,13 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert analysis["tokens"]["input_cache_ratio_percent"] == 50.0
     assert analysis["tokens"]["tokens_per_action"] == 25.0
     assert analysis["tokens"]["reasoning_share_percent"] == 50.0
+    phases = {phase["name"]: phase for phase in analysis["workflow"]["phases"]}
+    assert phases["Implement"]["actions"] == 1
+    assert phases["Verify"]["actions"] == 3
+    assert analysis["workflow"]["current_phase"] == "Verify"
+    markdown = render_markdown_summary(parse_trace(codex_trace(tmp_path)))
+    assert "## Reconstructed workflow" in markdown
+    assert "## Token economics" in markdown
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):
@@ -176,6 +183,9 @@ def test_report_is_self_contained_and_useful(tmp_path):
     assert "Failure recovered" in report
     assert "Restart brief" in report
     assert "RUN JOURNEY" in report
+    assert 'data-view="workflow"' in report
+    assert "RECONSTRUCTED WORKFLOW" in report
+    assert "MOST COMMON PHASE TRANSITIONS" in report
     assert "FILES CHANGED" in report
     assert "WHAT NEEDS ATTENTION" in report
     assert r"<\/script>" in render_html(parse_trace('\n'.join([
