@@ -1,10 +1,13 @@
 import json
+import hashlib
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
 from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
 from backtrace_agent.cli import main
+from backtrace_agent.bundle import write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
 
@@ -193,6 +196,23 @@ def test_side_effect_ledger_and_destructive_gate_are_explicit():
     report = render_html(run)
     assert 'data-view="effects"' in report
     assert "CONSEQUENTIAL ACTION LEDGER" in report
+
+
+def test_evidence_bundle_is_sanitized_complete_and_hash_verified(tmp_path):
+    run = parse_trace(codex_trace(tmp_path))
+    destination = write_evidence_bundle(run, tmp_path / "evidence.zip")
+    duplicate = write_evidence_bundle(run, tmp_path / "evidence-copy.zip")
+    assert destination.read_bytes() == duplicate.read_bytes()
+    with ZipFile(destination) as archive:
+        assert set(archive.namelist()) == {"report.html", "normalized.json", "summary.md", "manifest.json"}
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["raw_trace_included"] is False
+        for name, evidence in manifest["files"].items():
+            content = archive.read(name)
+            assert evidence["sha256"] == hashlib.sha256(content).hexdigest()
+            assert evidence["bytes"] == len(content)
+        combined = b"\n".join(archive.read(name) for name in archive.namelist())
+        assert b"ghp_abcdefghijklmnopqrstuvwxyz" not in combined
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

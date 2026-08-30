@@ -42,7 +42,8 @@ Or pass any JSON/JSONL trace explicitly:
 ```bash
 backtrace-agent examples/demo.jsonl -o report.html \
   --summary-output summary.md \
-  --normalized-output normalized.json
+  --normalized-output normalized.json \
+  --bundle evidence.zip
 ```
 
 Compare a new run with a known baseline:
@@ -130,6 +131,8 @@ The generated HTML report is self-contained: no server, database, API key, CDN, 
 The map includes per-agent action, failure, measured-time, file, and top-operation summaries. Event marks remain clickable even on a dense run, opening the same checkpoint inspector and review actions used elsewhere in the report.
 
 Every event has a **Copy checkpoint link** action. Opening that self-contained report URL restores the exact event inspector through a `#event=...` fragment. You can also bookmark events into a local **Review** queue and export the selected sanitized checkpoints as JSON. Bookmarks use browser-local storage scoped to the report session; they do not edit the report or source trace.
+
+`--bundle evidence.zip` creates one portable evidence package containing `report.html`, `normalized.json`, `summary.md`, and `manifest.json`. The manifest records byte sizes and SHA-256 hashes for every review payload. The bundle is deterministic for identical sanitized input and deliberately never includes the raw source trace.
 
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 
