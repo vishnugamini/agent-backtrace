@@ -120,7 +120,7 @@ export default function Home() {
         <div className="terminal"><div><span /><span /><span /></div><code><i>$</i> pip install git+https://github.com/vishnugamini/agent-backtrace.git<br /><i>$</i> backtrace-agent ~/.codex/sessions/run.jsonl -o report.html<br /><em>Report: report.html<br />Events: 184 · Agents: 4 · Signals: 3</em></code></div>
       </section>
 
-      <footer><a className="brand" href="#top"><span className="brandMark">B</span><span>BACKTRACE</span></a><p>Open source · MIT licensed · Built for curious humans supervising capable agents.</p><a href="https://github.com/vishnugamini/agent-backtrace">View source ↗</a></footer>
+      <footer><a className="brand" href="#top"><span className="brandMark">B</span><span>BACKTRACE</span></a><p>Built for curious humans supervising capable agents.</p><a href="https://github.com/vishnugamini/agent-backtrace">View source ↗</a></footer>
     </main>
   );
 }

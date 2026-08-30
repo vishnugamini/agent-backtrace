@@ -153,7 +153,3 @@ app/ + lib/            Interactive demo
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.
-
-## License
-
-MIT
