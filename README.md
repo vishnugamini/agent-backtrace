@@ -4,7 +4,7 @@
 
 **A local-first Python flight recorder for AI coding agents.** Turn raw Codex, Claude Code, and custom-agent JSON/JSONL logs into an interactive timeline, diagnostics, and a restart brief from any checkpoint.
 
-[Try the interactive demo](LIVE_DEMO_URL) · [Open an issue](https://github.com/vishnugamini/agent-backtrace/issues)
+[Try the interactive demo](https://agent-backtrace.disastrousyellow.chatgpt.site) · [Open an issue](https://github.com/vishnugamini/agent-backtrace/issues)
 
 ## The problem
 
