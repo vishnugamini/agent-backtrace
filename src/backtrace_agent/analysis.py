@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, asdict
+from statistics import median
 from typing import Any
 
 from .core import Event, Run, detect_signals
@@ -128,6 +129,47 @@ def analyze_run(run: Run) -> dict[str, Any]:
             transition_counts[(before, after)] += 1
     dominant_phase = max(workflow_phases, key=lambda phase: (phase["measured_ms"], phase["actions"]), default=None)
 
+    action_events = [event for event in run.events if event.kind in {"tool", "file", "handoff", "error"}]
+    open_incidents: dict[str, dict[str, Any]] = {}
+    incidents: list[dict[str, Any]] = []
+    for index, event in enumerate(action_events):
+        if event.metadata.get("long_running"):
+            continue
+        operation = event.operation or event.title
+        if event.status == "error":
+            incident = open_incidents.get(operation)
+            if incident:
+                incident["failure_event_ids"].append(event.id)
+                incident["latest_failure_event_id"] = event.id
+                incident["failure_details"].append(_short(event.detail, 220))
+            else:
+                open_incidents[operation] = {
+                    "id": f"incident-{event.id}", "operation": operation, "status": "unresolved",
+                    "first_failure_event_id": event.id, "latest_failure_event_id": event.id,
+                    "failure_event_ids": [event.id], "failure_details": [_short(event.detail, 220)],
+                    "recovery_event_id": None, "recovery_title": None, "started_at_ms": event.at_ms,
+                    "time_to_recovery_ms": None, "intervening_actions": None, "files": [],
+                    "phase": classify_phase(event), "turn_id": event.turn_id, "_start_index": index,
+                }
+        elif event.status == "ok" and operation in open_incidents:
+            incident = open_incidents.pop(operation)
+            incident["status"] = "recovered"
+            incident["recovery_event_id"] = event.id
+            incident["recovery_title"] = event.title
+            incident["time_to_recovery_ms"] = max(0, event.at_ms - incident["started_at_ms"])
+            incident["intervening_actions"] = max(0, index - incident["_start_index"] - 1)
+            incident["files"] = sorted({path for item in action_events[incident["_start_index"]:index + 1] for path in item.files})
+            incidents.append(incident)
+    for incident in open_incidents.values():
+        incident["intervening_actions"] = max(0, len(action_events) - incident["_start_index"] - 1)
+        incident["files"] = sorted({path for item in action_events[incident["_start_index"]:] for path in item.files})
+        incidents.append(incident)
+    for incident in incidents:
+        incident["failed_attempts"] = len(incident["failure_event_ids"])
+        incident.pop("_start_index", None)
+    incidents.sort(key=lambda incident: (incident["status"] == "recovered", incident["started_at_ms"]))
+    recovery_times = [incident["time_to_recovery_ms"] for incident in incidents if incident["time_to_recovery_ms"] is not None]
+
     total_tokens = run.tokens.get("total_tokens", 0)
     input_tokens = run.tokens.get("input_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
@@ -177,6 +219,13 @@ def analyze_run(run: Run) -> dict[str, Any]:
             "dominant_phase": dominant_phase["name"] if dominant_phase else None,
             "current_phase": classified_actions[-1][0] if classified_actions else None,
             "current_event_id": classified_actions[-1][1].id if classified_actions else None,
+        },
+        "incidents": {
+            "items": incidents,
+            "total": len(incidents),
+            "recovered": sum(incident["status"] == "recovered" for incident in incidents),
+            "unresolved": sum(incident["status"] == "unresolved" for incident in incidents),
+            "median_recovery_ms": round(median(recovery_times)) if recovery_times else None,
         },
         "tokens": {
             **run.tokens,
@@ -230,6 +279,7 @@ def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
         metric("tool_seconds_per_turn", "Measured tool time per turn", baseline_analysis["timing"]["measured_tool_ms"] / baseline_turns / 1000, current_analysis["timing"]["measured_tool_ms"] / current_turns / 1000, "lower", "sec"),
         metric("actions_per_turn", "Actions per turn", ba["actions"] / baseline_turns, ca["actions"] / current_turns, "neutral"),
         metric("failures_per_100_actions", "Failures per 100 actions", ba["failures"] / baseline_actions * 100, ca["failures"] / current_actions * 100, "lower"),
+        metric("unresolved_incidents_per_100_actions", "Unresolved failure incidents per 100 actions", baseline_analysis["incidents"]["unresolved"] / baseline_actions * 100, current_analysis["incidents"]["unresolved"] / current_actions * 100, "lower"),
         metric("repetitions_per_turn", "Repeated actions per turn", baseline_signal_counts["repetition"] / baseline_turns, current_signal_counts["repetition"] / current_turns, "lower"),
         metric("stalls_per_turn", "Stalls per turn", baseline_signal_counts["stall"] / baseline_turns, current_signal_counts["stall"] / current_turns, "lower"),
         metric("slow_actions_per_100", "Slow actions per 100 actions", baseline_signal_counts["slow"] / baseline_actions * 100, current_signal_counts["slow"] / current_actions * 100, "lower"),
@@ -302,6 +352,10 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
     if policy.get("max_failures") is not None:
         limit = int(policy["max_failures"])
         add("max_failures", "Failed actions", counts["failures"], f"≤ {limit}", counts["failures"] <= limit, f"Detected {counts['failures']} failed action(s).")
+    if policy.get("max_unresolved_failures") is not None:
+        limit = int(policy["max_unresolved_failures"])
+        actual = analysis["incidents"]["unresolved"]
+        add("max_unresolved_failures", "Unresolved failure incidents", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} operation-level failure incident(s) without later successful recovery evidence.")
     if policy.get("max_repetitions") is not None:
         limit = int(policy["max_repetitions"])
         actual = signal_counts["repetition"]
@@ -371,6 +425,13 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
             f"Recorded cumulative tokens: **{token_stats['total_tokens']:,}**; {token_stats['tokens_per_action']:,} per meaningful action; {token_stats['input_cache_ratio_percent']}% input-cache ratio.",
             "These are trace counters, not billing or price estimates.",
         ])
+    incidents = analysis["incidents"]
+    lines.extend(["", "## Failure incidents", f"Recovered: **{incidents['recovered']}**. Unresolved: **{incidents['unresolved']}**."])
+    lines.extend([
+        f"- **{incident['operation']}** — {incident['status']}; {incident['failed_attempts']} failed attempt(s); "
+        + (f"recovered after {round(incident['time_to_recovery_ms']/1000, 1)}s" if incident["status"] == "recovered" else "no later successful operation recorded")
+        for incident in incidents["items"]
+    ] or ["- No failure incidents detected."])
     lines.extend(["", "## Diagnostic signals"])
     lines.extend([f"- **{signal['title']}** ({signal['severity']}): {signal['detail']}" for signal in analysis["signals"]] or ["- None detected."])
     lines.extend(["", "## Files changed"])

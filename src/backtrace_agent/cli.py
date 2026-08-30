@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--open", action="store_true", help="Open the generated report in the default browser")
     parser.add_argument("--fail-on-errors", action="store_true", help="Exit 1 when the trace contains failed actions (useful in CI)")
     parser.add_argument("--max-failures", type=nonnegative_int, metavar="N", help="Fail the quality gate when failed actions exceed N")
+    parser.add_argument("--max-unresolved-failures", type=nonnegative_int, metavar="N", help="Fail when operation-level failures lack later successful recovery evidence")
     parser.add_argument("--max-repetitions", type=nonnegative_int, metavar="N", help="Fail the quality gate when repeated-action signals exceed N")
     parser.add_argument("--max-stalls", type=nonnegative_int, metavar="N", help="Fail the quality gate when within-turn stalls exceed N")
     parser.add_argument("--max-failure-rate", type=nonnegative_float, metavar="PERCENT", help="Fail when failed actions exceed this percentage of actions")
@@ -76,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     comparison = compare_runs(run, baseline) if baseline else None
     policy_spec = {
         "max_failures": 0 if args.fail_on_errors else args.max_failures,
+        "max_unresolved_failures": args.max_unresolved_failures,
         "max_repetitions": args.max_repetitions,
         "max_stalls": args.max_stalls,
         "max_failure_rate": args.max_failure_rate,

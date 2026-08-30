@@ -84,9 +84,15 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert phases["Implement"]["actions"] == 1
     assert phases["Verify"]["actions"] == 3
     assert analysis["workflow"]["current_phase"] == "Verify"
+    assert analysis["incidents"]["total"] == 1
+    assert analysis["incidents"]["recovered"] == 1
+    assert analysis["incidents"]["unresolved"] == 0
+    assert analysis["incidents"]["median_recovery_ms"] == 2000
+    assert analysis["incidents"]["items"][0]["files"] == ["src/app.py"]
     markdown = render_markdown_summary(parse_trace(codex_trace(tmp_path)))
     assert "## Reconstructed workflow" in markdown
     assert "## Token economics" in markdown
+    assert "## Failure incidents" in markdown
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):
@@ -150,6 +156,10 @@ def test_quality_gate_is_explainable_and_rendered(tmp_path):
     token_report = render_html(run)
     assert 'data-view="tokens"' in token_report
     assert "TOKEN ECONOMICS" in token_report
+    assert 'data-view="incidents"' in token_report
+    assert "FAILURE → RECOVERY CHAINS" in token_report
+    incident_gate = evaluate_policy(run, {"max_unresolved_failures": 0})
+    assert incident_gate["passed"] is True
 
 
 def test_missing_token_counters_are_explicit_and_do_not_create_empty_view(tmp_path):
@@ -165,6 +175,7 @@ def test_cli_quality_gate_controls_exit_status(tmp_path):
     trace = generic_trace(tmp_path)
     assert main([str(trace), "--output", str(tmp_path / "failed.html"), "--max-failures", "0"]) == 1
     assert main([str(trace), "--output", str(tmp_path / "passed.html"), "--max-failures", "1"]) == 0
+    assert main([str(trace), "--output", str(tmp_path / "unresolved.html"), "--max-unresolved-failures", "0"]) == 1
 
 
 def test_restart_brief_is_checkpointed_and_redacted(tmp_path):
