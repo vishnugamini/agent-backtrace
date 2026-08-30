@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, compare_runs, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
+from backtrace_agent.cli import main
 from backtrace_agent.core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
 
@@ -118,6 +119,26 @@ def test_custom_suppression_is_non_destructive_and_covers_exports(tmp_path):
     assert protected.metadata["custom_suppression"]["term_count"] == 3
     assert protected.privacy_findings["custom_suppression"] >= 3
     assert "analyzer" not in render_html(protected).casefold()
+
+
+def test_quality_gate_is_explainable_and_rendered(tmp_path):
+    run = parse_trace(codex_trace(tmp_path))
+    gate = evaluate_policy(run, {"max_failures": 0, "max_repetitions": 1, "require_evidence": True})
+    assert gate["configured"] is True
+    assert gate["passed"] is False
+    assert gate["summary"] == {"passed": 2, "failed": 1}
+    failed = next(check for check in gate["checks"] if not check["passed"])
+    assert failed["key"] == "max_failures"
+    report = render_html(run, quality_gate=gate)
+    assert "QUALITY GATE FAIL" in report
+    assert "ENFORCEABLE QUALITY GATE · FAIL" in report
+    assert "## Quality gate" in render_markdown_summary(run, quality_gate=gate)
+
+
+def test_cli_quality_gate_controls_exit_status(tmp_path):
+    trace = generic_trace(tmp_path)
+    assert main([str(trace), "--output", str(tmp_path / "failed.html"), "--max-failures", "0"]) == 1
+    assert main([str(trace), "--output", str(tmp_path / "passed.html"), "--max-failures", "1"]) == 0
 
 
 def test_restart_brief_is_checkpointed_and_redacted(tmp_path):

@@ -60,6 +60,22 @@ backtrace-agent run.jsonl \
 
 `--suppress` is repeatable and case-insensitive. It removes matching whole terms from lines, paths, and exportable metadata without modifying the source trace. The report records how many items were removed without exposing the suppression terms themselves.
 
+Enforce agent-run quality in CI:
+
+```bash
+backtrace-agent current.jsonl \
+  --compare baseline.jsonl \
+  --max-failures 2 \
+  --max-repetitions 0 \
+  --max-stalls 1 \
+  --max-failure-rate 5 \
+  --require-evidence \
+  --fail-on-regression \
+  -o quality-report.html
+```
+
+Configured checks are embedded in HTML, JSON, and Markdown with actual and expected values. The command exits `1` if any check fails and `0` when every check passes, making the result usable in GitHub Actions and other CI systems. `--fail-on-errors` remains a shorthand for `--max-failures 0`.
+
 Create a restart brief from a specific normalized event:
 
 ```bash

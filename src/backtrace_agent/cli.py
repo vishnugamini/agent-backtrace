@@ -7,9 +7,23 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from .analysis import analyze_run, compare_runs, render_markdown_summary
+from .analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
 from .core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from .report import write_report
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
     parser.add_argument("--open", action="store_true", help="Open the generated report in the default browser")
     parser.add_argument("--fail-on-errors", action="store_true", help="Exit 1 when the trace contains failed actions (useful in CI)")
+    parser.add_argument("--max-failures", type=nonnegative_int, metavar="N", help="Fail the quality gate when failed actions exceed N")
+    parser.add_argument("--max-repetitions", type=nonnegative_int, metavar="N", help="Fail the quality gate when repeated-action signals exceed N")
+    parser.add_argument("--max-stalls", type=nonnegative_int, metavar="N", help="Fail the quality gate when within-turn stalls exceed N")
+    parser.add_argument("--max-failure-rate", type=nonnegative_float, metavar="PERCENT", help="Fail when failed actions exceed this percentage of actions")
+    parser.add_argument("--require-evidence", action="store_true", help="Require at least one successful test, build, package, push, or deployment proof")
+    parser.add_argument("--fail-on-regression", action="store_true", help="Fail when --compare produces a regressed verdict")
     return parser
 
 
@@ -51,10 +71,19 @@ def main(argv: list[str] | None = None) -> int:
     signals = detect_signals(run.events)
     analysis = analyze_run(run)
     comparison = compare_runs(run, baseline) if baseline else None
-    export = {"run": run.as_dict(), "analysis": analysis, "comparison": comparison}
+    policy_spec = {
+        "max_failures": 0 if args.fail_on_errors else args.max_failures,
+        "max_repetitions": args.max_repetitions,
+        "max_stalls": args.max_stalls,
+        "max_failure_rate": args.max_failure_rate,
+        "require_evidence": args.require_evidence,
+        "fail_on_regression": args.fail_on_regression,
+    }
+    quality_gate = evaluate_policy(run, policy_spec, comparison)
+    export = {"run": run.as_dict(), "analysis": analysis, "comparison": comparison, "quality_gate": quality_gate}
     if args.json:
         print(json.dumps(export, indent=2, ensure_ascii=False))
-    report = write_report(run, args.output, comparison=comparison)
+    report = write_report(run, args.output, comparison=comparison, quality_gate=quality_gate)
     print(f"Report: {report.resolve()}")
     counts = analysis["counts"]
     print(f"Source: {trace.resolve()}")
@@ -67,11 +96,14 @@ def main(argv: list[str] | None = None) -> int:
     if comparison:
         summary = comparison["summary"]
         print(f"Comparison: {comparison['verdict']} · {summary['regressions']} regression(s) · {summary['improvements']} improvement(s) vs {args.compare.resolve()}")
+    if quality_gate["configured"]:
+        gate = quality_gate["summary"]
+        print(f"Quality gate: {'passed' if quality_gate['passed'] else 'FAILED'} · {gate['passed']} passed · {gate['failed']} failed")
     if args.normalized_output:
         args.normalized_output.write_text(json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"Normalized JSON: {args.normalized_output.resolve()}")
     if args.summary_output:
-        args.summary_output.write_text(render_markdown_summary(run, comparison), encoding="utf-8")
+        args.summary_output.write_text(render_markdown_summary(run, comparison, quality_gate), encoding="utf-8")
         print(f"Summary: {args.summary_output.resolve()}")
     if args.restart_at:
         try:
@@ -83,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Restart brief: {args.brief_output.resolve()}")
     if args.open:
         webbrowser.open(report.resolve().as_uri())
-    return 1 if args.fail_on_errors and counts["failures"] else 0
+    return 1 if quality_gate["configured"] and not quality_gate["passed"] else 0
 
 
 if __name__ == "__main__":

@@ -203,7 +203,49 @@ def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
     }
 
 
-def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None) -> str:
+def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Evaluate explicit, machine-enforceable quality checks for a run."""
+    analysis = analyze_run(run)
+    counts = analysis["counts"]
+    signal_counts = Counter(item["kind"] for item in analysis["signals"])
+    action_count = max(1, counts["actions"])
+    failure_rate = counts["failures"] / action_count * 100
+    checks: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, actual: Any, expected: str, passed: bool, detail: str) -> None:
+        checks.append({"key": key, "label": label, "actual": actual, "expected": expected, "passed": passed, "detail": detail})
+
+    if policy.get("max_failures") is not None:
+        limit = int(policy["max_failures"])
+        add("max_failures", "Failed actions", counts["failures"], f"≤ {limit}", counts["failures"] <= limit, f"Detected {counts['failures']} failed action(s).")
+    if policy.get("max_repetitions") is not None:
+        limit = int(policy["max_repetitions"])
+        actual = signal_counts["repetition"]
+        add("max_repetitions", "Repeated actions", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} repeated-action signal(s).")
+    if policy.get("max_stalls") is not None:
+        limit = int(policy["max_stalls"])
+        actual = signal_counts["stall"]
+        add("max_stalls", "Unexplained stalls", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} within-turn stall signal(s).")
+    if policy.get("max_failure_rate") is not None:
+        limit = float(policy["max_failure_rate"])
+        add("max_failure_rate", "Failure rate", round(failure_rate, 2), f"≤ {limit:g}%", failure_rate <= limit, f"{counts['failures']} failures across {counts['actions']} actions.")
+    if policy.get("require_evidence"):
+        actual = len(analysis["completion_evidence"])
+        add("require_evidence", "Completion evidence", actual, "≥ 1", actual >= 1, f"Detected {actual} successful verification, package, push, or deployment evidence item(s).")
+    if policy.get("fail_on_regression"):
+        verdict = comparison["verdict"] if comparison else "unavailable"
+        passed = comparison is not None and verdict != "regressed"
+        detail = "No comparison baseline was supplied." if comparison is None else f"Comparison verdict: {verdict}."
+        add("fail_on_regression", "Baseline regression", verdict, "not regressed", passed, detail)
+    return {
+        "configured": bool(checks),
+        "passed": all(check["passed"] for check in checks),
+        "checks": checks,
+        "summary": {"passed": sum(check["passed"] for check in checks), "failed": sum(not check["passed"] for check in checks)},
+    }
+
+
+def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, quality_gate: dict[str, Any] | None = None) -> str:
     analysis = analyze_run(run)
     counts = analysis["counts"]
     lines = [
@@ -227,4 +269,7 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None) 
     if comparison:
         lines.extend(["", "## Baseline comparison", f"Verdict: **{comparison['verdict']}** against `{comparison['baseline']['name']}`."])
         lines.extend([f"- **{item['title']}** ({item['kind']}): {item['detail']}" for item in comparison["findings"]] or ["- No material normalized changes detected."])
+    if quality_gate and quality_gate["configured"]:
+        lines.extend(["", "## Quality gate", f"Result: **{'PASS' if quality_gate['passed'] else 'FAIL'}**."])
+        lines.extend([f"- {'PASS' if check['passed'] else 'FAIL'} — **{check['label']}**: actual `{check['actual']}`, expected `{check['expected']}`. {check['detail']}" for check in quality_gate["checks"]])
     return "\n".join(lines)
