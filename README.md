@@ -134,6 +134,14 @@ Every event has a **Copy checkpoint link** action. Opening that self-contained r
 
 `--bundle evidence.zip` creates one portable evidence package containing `report.html`, `normalized.json`, `summary.md`, and `manifest.json`. The manifest records byte sizes and SHA-256 hashes for every review payload. The bundle is deterministic for identical sanitized input and deliberately never includes the raw source trace.
 
+Verify a received bundle offline, without opening or extracting it:
+
+```bash
+backtrace-agent --verify-bundle evidence.zip
+```
+
+Verification requires exactly one copy of every expected file, checks the bundle format and raw-trace exclusion declaration, and recomputes every byte size and SHA-256 hash. It exits `0` when valid, `1` when altered or malformed, and `2` for conflicting CLI usage.
+
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 
 ## Supported input

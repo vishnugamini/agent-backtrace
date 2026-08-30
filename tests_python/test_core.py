@@ -7,7 +7,7 @@ import pytest
 
 from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
 from backtrace_agent.cli import main
-from backtrace_agent.bundle import write_evidence_bundle
+from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
 
@@ -213,6 +213,18 @@ def test_evidence_bundle_is_sanitized_complete_and_hash_verified(tmp_path):
             assert evidence["bytes"] == len(content)
         combined = b"\n".join(archive.read(name) for name in archive.namelist())
         assert b"ghp_abcdefghijklmnopqrstuvwxyz" not in combined
+    assert verify_evidence_bundle(destination) == {"valid": True, "files_verified": 3, "errors": []}
+    tampered = tmp_path / "tampered.zip"
+    with ZipFile(destination) as source, ZipFile(tampered, "w") as target:
+        for name in source.namelist():
+            content = source.read(name) + (b"changed" if name == "report.html" else b"")
+            target.writestr(name, content)
+    verification = verify_evidence_bundle(tampered)
+    assert verification["valid"] is False
+    assert verification["files_verified"] == 2
+    assert verification["errors"] == ["SHA-256 mismatch for report.html."]
+    assert main(["--verify-bundle", str(destination)]) == 0
+    assert main(["--verify-bundle", str(tampered)]) == 1
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

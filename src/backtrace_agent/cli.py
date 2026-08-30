@@ -8,7 +8,7 @@ import webbrowser
 from pathlib import Path
 
 from .analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
-from .bundle import write_evidence_bundle
+from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from .report import write_report
 
@@ -30,6 +30,7 @@ def nonnegative_float(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backtrace-agent", description="Turn raw AI-agent logs into evidence-backed diagnostics and restart context.")
     parser.add_argument("trace", type=Path, nargs="?", help="JSON/JSONL trace. Omit to use the newest local Codex session.")
+    parser.add_argument("--verify-bundle", type=Path, metavar="ZIP", help="Verify an evidence bundle's structure, sizes, and hashes, then exit")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
     parser.add_argument("--json", action="store_true", help="Print privacy-safe normalized data as JSON")
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
@@ -65,6 +66,18 @@ def newest_codex_session() -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verify_bundle:
+        if args.trace:
+            print("backtrace-agent: do not pass a trace with --verify-bundle", file=sys.stderr)
+            return 2
+        result = verify_evidence_bundle(args.verify_bundle)
+        if result["valid"]:
+            print(f"Bundle verification: PASS · {result['files_verified']} payload(s) verified · {args.verify_bundle.resolve()}")
+            return 0
+        print(f"Bundle verification: FAIL · {args.verify_bundle.resolve()}", file=sys.stderr)
+        for error in result["errors"]:
+            print(f"- {error}", file=sys.stderr)
+        return 1
     try:
         trace = args.trace or newest_codex_session()
         run = parse_trace(trace)
