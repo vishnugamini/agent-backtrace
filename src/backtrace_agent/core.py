@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shlex
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -155,6 +156,84 @@ def redact_secrets(value: str) -> str:
     for _, pattern, replacement in SECRET_PATTERNS:
         value = pattern.sub(replacement, value)
     return value
+
+
+def suppress_content(run: Run, terms: Iterable[str]) -> Run:
+    """Return a copy with matching lines and paths removed from every exportable field.
+
+    This is for ordinary sensitive content that pattern-based credential
+    redaction cannot infer, such as client names, internal codenames, or a
+    historical comment. The source Run and trace are never modified.
+    """
+    normalized = list(dict.fromkeys(term.strip() for term in terms if term.strip()))
+    if not normalized:
+        return deepcopy(run)
+    result = deepcopy(run)
+    removed = 0
+    patterns = [re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.I) for term in normalized]
+
+    def matches(value: str) -> bool:
+        return any(pattern.search(value) for pattern in patterns)
+
+    def clean_text(value: str) -> str:
+        nonlocal removed
+        kept = []
+        for line in value.splitlines():
+            if matches(line):
+                removed += 1
+            else:
+                kept.append(line)
+        return "\n".join(kept).strip()
+
+    def clean_value(value: Any) -> Any:
+        nonlocal removed
+        if isinstance(value, str):
+            return clean_text(value)
+        if isinstance(value, list):
+            cleaned_list = []
+            for item in value:
+                if isinstance(item, str) and matches(item):
+                    removed += 1
+                else:
+                    cleaned_list.append(clean_value(item))
+            return cleaned_list
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, item in value.items():
+                if matches(str(key)):
+                    removed += 1
+                    continue
+                cleaned[key] = clean_value(item)
+            return cleaned
+        return value
+
+    result.name = clean_text(result.name) or "suppressed-run"
+    result.source = clean_text(result.source) or "Suppressed source"
+    result.goal = clean_text(result.goal)
+    result.cwd = clean_text(result.cwd or "") or None
+    for turn in result.turns:
+        turn.user_request = clean_text(turn.user_request)
+        turn.final_response = clean_text(turn.final_response)
+    for event in result.events:
+        event.title = clean_text(event.title) or "Suppressed event"
+        event.detail = clean_text(event.detail)
+        event.input = clean_text(event.input)
+        event.output = clean_text(event.output)
+        event.operation = clean_text(event.operation or "") or None
+        event.agent = clean_text(event.agent) or "suppressed"
+        kept_files = []
+        for path in event.files:
+            if matches(path):
+                removed += 1
+            else:
+                kept_files.append(path)
+        event.files = kept_files
+        event.metadata = clean_value(event.metadata)
+        event.raw = {}
+    result.metadata = clean_value(result.metadata)
+    result.metadata["custom_suppression"] = {"term_count": len(normalized), "removed_items": removed}
+    result.privacy_findings["custom_suppression"] = removed
+    return result
 
 
 def _safe(value: Any, length: int = 6000) -> str:

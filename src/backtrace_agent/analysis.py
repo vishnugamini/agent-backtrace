@@ -111,7 +111,12 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "attention_items": attention_items[:12],
         "tokens": {**run.tokens, "cache_ratio_percent": cache_ratio},
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
-        "privacy": {"redactions": run.privacy_findings, "total_findings": sum(run.privacy_findings.values())},
+        "privacy": {
+            "redactions": run.privacy_findings,
+            "secret_findings": sum(value for key, value in run.privacy_findings.items() if key != "custom_suppression"),
+            "custom_suppressions": run.privacy_findings.get("custom_suppression", 0),
+            "total_findings": sum(run.privacy_findings.values()),
+        },
         "goal": {"objective": run.goal, "claimed_status": run.goal_status, "evidence_count": len(evidence)},
     }
 
@@ -218,7 +223,7 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None) 
     lines.extend(["", "## Completion evidence"])
     lines.extend([f"- {item['title']}" for item in analysis["completion_evidence"]] or ["- No build, test, push, or deployment evidence was detected."])
     if analysis["privacy"]["total_findings"]:
-        lines.extend(["", "## Privacy", f"Backtrace redacted {analysis['privacy']['total_findings']} potential secret occurrence(s) from generated output."])
+        lines.extend(["", "## Privacy", f"Backtrace applied {analysis['privacy']['total_findings']} privacy protection(s) to generated output ({analysis['privacy']['secret_findings']} recognized secret pattern(s), {analysis['privacy']['custom_suppressions']} custom suppression(s))."])
     if comparison:
         lines.extend(["", "## Baseline comparison", f"Verdict: **{comparison['verdict']}** against `{comparison['baseline']['name']}`."])
         lines.extend([f"- **{item['title']}** ({item['kind']}): {item['detail']}" for item in comparison["findings"]] or ["- No material normalized changes detected."])

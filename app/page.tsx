@@ -66,7 +66,7 @@ export default function Home() {
         <h1>See where your agent<br /><em>changed course.</em></h1>
         <p className="lede">Turn raw Codex, Claude Code, and agent JSONL logs into a navigable story of decisions, tools, files, failures, and handoffs—then restart from any moment with the context intact.</p>
         <div className="heroActions"><button className="primary" onClick={() => fileRef.current?.click()}>Open a trace <span>→</span></button><button className="secondary" onClick={loadDemo}>Try the demo run</button></div>
-        <div className="privacy"><span>◆</span> Local by design · No upload · No API key · Python 3.10+</div>
+        <div className="privacy"><span>◆</span> Local by design · No upload · Secret redaction · Custom suppression · Python 3.10+</div>
       </section>
 
       <section className="workspace" id="workspace">

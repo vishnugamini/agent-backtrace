@@ -8,7 +8,7 @@ import webbrowser
 from pathlib import Path
 
 from .analysis import analyze_run, compare_runs, render_markdown_summary
-from .core import build_restart_brief, detect_signals, parse_trace
+from .core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from .report import write_report
 
 
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
     parser.add_argument("--summary-output", type=Path, help="Write an evidence-backed Markdown run summary")
     parser.add_argument("--compare", type=Path, metavar="BASELINE", help="Compare this run with a baseline JSON/JSONL trace")
+    parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
     parser.add_argument("--open", action="store_true", help="Open the generated report in the default browser")
@@ -41,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
         trace = args.trace or newest_codex_session()
         run = parse_trace(trace)
         baseline = parse_trace(args.compare) if args.compare else None
+        if args.suppress:
+            run = suppress_content(run, args.suppress)
+            baseline = suppress_content(baseline, args.suppress) if baseline else None
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
         return 2
@@ -55,8 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     counts = analysis["counts"]
     print(f"Source: {trace.resolve()}")
     print(f"Turns: {counts['turns']} · Meaningful events: {counts['events']} · Actions: {counts['actions']} · Failed: {counts['failures']} · Signals: {len(signals)}")
-    if analysis["privacy"]["total_findings"]:
-        print(f"Privacy: redacted {analysis['privacy']['total_findings']} potential secret occurrence(s) from generated outputs")
+    if analysis["privacy"]["secret_findings"]:
+        print(f"Privacy: redacted {analysis['privacy']['secret_findings']} recognized secret occurrence(s) from generated outputs")
+    suppression = run.metadata.get("custom_suppression") or {}
+    if suppression:
+        print(f"Custom suppression: removed {suppression.get('removed_items', 0)} matching line(s), path(s), or metadata item(s)")
     if comparison:
         summary = comparison["summary"]
         print(f"Comparison: {comparison['verdict']} · {summary['regressions']} regression(s) · {summary['improvements']} improvement(s) vs {args.compare.resolve()}")

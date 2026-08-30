@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from backtrace_agent.analysis import analyze_run, compare_runs, render_markdown_summary
-from backtrace_agent.core import build_restart_brief, detect_signals, parse_trace
+from backtrace_agent.core import build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
 
 
@@ -104,6 +104,20 @@ def test_comparison_appears_in_report_and_markdown(tmp_path):
     assert "LARGEST OPERATION COUNT CHANGES" in report
     assert '"comparison": {' in report
     assert "## Baseline comparison" in render_markdown_summary(current, comparison)
+
+
+def test_custom_suppression_is_non_destructive_and_covers_exports(tmp_path):
+    original = parse_trace(codex_trace(tmp_path))
+    protected = suppress_content(original, ["analyzer", "src/app.py", "3 passed"])
+    exported = json.dumps(protected.as_dict()).casefold()
+    assert "analyzer" not in exported
+    assert "src/app.py" not in exported
+    assert "3 passed" not in exported
+    assert original.turns[0].user_request == "Build the analyzer"
+    assert original.events[2].files == ["src/app.py"]
+    assert protected.metadata["custom_suppression"]["term_count"] == 3
+    assert protected.privacy_findings["custom_suppression"] >= 3
+    assert "analyzer" not in render_html(protected).casefold()
 
 
 def test_restart_brief_is_checkpointed_and_redacted(tmp_path):

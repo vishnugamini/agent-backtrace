@@ -49,6 +49,17 @@ backtrace-agent current.jsonl --compare baseline.jsonl -o comparison.html
 
 The comparison report separates regressions from improvements, identifies new and resolved failing operations, and shows how operation counts and changed-file scope moved. Efficiency metrics are normalized per turn or per 100 actions so larger tasks are not automatically judged worse.
 
+Remove ordinary sensitive content before sharing an artifact:
+
+```bash
+backtrace-agent run.jsonl \
+  --suppress "Client Name" \
+  --suppress "internal-project" \
+  -o share-safe-report.html
+```
+
+`--suppress` is repeatable and case-insensitive. It removes matching whole terms from lines, paths, and exportable metadata without modifying the source trace. The report records how many items were removed without exposing the suppression terms themselves.
+
 Create a restart brief from a specific normalized event:
 
 ```bash
@@ -123,6 +134,8 @@ These are useful heuristics, not claims about agent intent. The source event is 
 ## Privacy and safety
 
 Agent logs can contain prompts, source code, local paths, command output, and credentials. Backtrace processes files locally and its generated report has no network dependencies. Every generated artifact excludes raw provider payloads and redacts common OpenAI, GitHub, Sites, AWS, bearer-token, private-key, and named-secret patterns by default.
+
+For non-secret information that is still private, use repeatable `--suppress TERM` options. Custom suppression is applied to the current run and its comparison baseline before HTML, JSON, Markdown, or restart content is generated.
 
 Redaction is defense-in-depth, not a guarantee. Review any trace or restart brief before sharing it.
 
