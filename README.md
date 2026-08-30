@@ -46,6 +46,18 @@ backtrace-agent examples/demo.jsonl -o report.html \
   --bundle evidence.zip
 ```
 
+Follow an active trace and regenerate every selected artifact whenever the file grows:
+
+```bash
+backtrace-agent current.jsonl --watch --watch-interval 0.5 \
+  -o live-report.html \
+  --normalized-output live.json \
+  --summary-output live.md \
+  --bundle live-evidence.zip
+```
+
+Watch mode processes the existing trace immediately, then polls its modification time and size until Ctrl-C. HTML, JSON, Markdown, restart briefs, and ZIP bundles are replaced atomically, so readers never observe half-written output. Parse errors do not overwrite the last valid artifacts, and `--open` opens only the first successful report rather than a new browser tab on every update.
+
 Compare a new run with a known baseline:
 
 ```bash

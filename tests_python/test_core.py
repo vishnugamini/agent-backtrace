@@ -6,7 +6,7 @@ from zipfile import ZipFile
 import pytest
 
 from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
-from backtrace_agent.cli import main
+from backtrace_agent.cli import _watch, build_parser, main
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
@@ -225,6 +225,26 @@ def test_evidence_bundle_is_sanitized_complete_and_hash_verified(tmp_path):
     assert verification["errors"] == ["SHA-256 mismatch for report.html."]
     assert main(["--verify-bundle", str(destination)]) == 0
     assert main(["--verify-bundle", str(tampered)]) == 1
+
+
+def test_watch_mode_regenerates_all_outputs_atomically(tmp_path):
+    trace = write_jsonl(tmp_path, [{"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"role": "user", "content": "First event"}}], "watch.jsonl")
+    report = tmp_path / "watch-report.html"
+    normalized = tmp_path / "watch.json"
+    summary = tmp_path / "watch.md"
+    bundle = tmp_path / "watch.zip"
+    args = build_parser().parse_args([str(trace), "--watch", "-o", str(report), "--normalized-output", str(normalized), "--summary-output", str(summary), "--bundle", str(bundle)])
+
+    def append_event(_interval):
+        second = json.dumps({"timestamp": "2026-08-29T12:00:01Z", "type": "message", "payload": {"role": "assistant", "content": "Second event"}})
+        trace.write_text(trace.read_text(encoding="utf-8") + "\n" + second, encoding="utf-8")
+
+    assert _watch(args, trace, _sleep=append_event, _max_cycles=2) == 0
+    assert json.loads(normalized.read_text())["analysis"]["counts"]["events"] == 2
+    assert "Second event" in report.read_text()
+    assert "## Agent activity" in summary.read_text()
+    assert verify_evidence_bundle(bundle)["valid"] is True
+    assert not list(tmp_path.glob(".watch-*"))
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

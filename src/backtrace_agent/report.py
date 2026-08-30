@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from pathlib import Path
+import tempfile
 
 from .analysis import analyze_run, render_markdown_summary
 from .core import Run
@@ -197,5 +199,11 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
 def write_report(run: Run, destination: str | Path, *, comparison: dict | None = None, quality_gate: dict | None = None) -> Path:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(render_html(run, comparison, quality_gate), encoding="utf-8")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    os.close(descriptor)
+    try:
+        Path(temporary).write_text(render_html(run, comparison, quality_gate), encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     return destination

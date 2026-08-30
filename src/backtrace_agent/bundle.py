@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .analysis import analyze_run, render_markdown_summary
@@ -45,9 +47,15 @@ def write_evidence_bundle(
         },
     }
     payloads["manifest.json"] = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    with ZipFile(destination, "w") as archive:
-        for name, content in payloads.items():
-            archive.writestr(_zip_info(name), content)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".zip", dir=destination.parent)
+    os.close(descriptor)
+    try:
+        with ZipFile(temporary, "w") as archive:
+            for name, content in payloads.items():
+                archive.writestr(_zip_info(name), content)
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     return destination
 
 

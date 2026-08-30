@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import sys
+import tempfile
+import time
 import webbrowser
 from pathlib import Path
 
@@ -27,10 +29,19 @@ def nonnegative_float(value: str) -> float:
     return parsed
 
 
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backtrace-agent", description="Turn raw AI-agent logs into evidence-backed diagnostics and restart context.")
     parser.add_argument("trace", type=Path, nargs="?", help="JSON/JSONL trace. Omit to use the newest local Codex session.")
     parser.add_argument("--verify-bundle", type=Path, metavar="ZIP", help="Verify an evidence bundle's structure, sizes, and hashes, then exit")
+    parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
+    parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
     parser.add_argument("--json", action="store_true", help="Print privacy-safe normalized data as JSON")
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
@@ -64,22 +75,19 @@ def newest_codex_session() -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.verify_bundle:
-        if args.trace:
-            print("backtrace-agent: do not pass a trace with --verify-bundle", file=sys.stderr)
-            return 2
-        result = verify_evidence_bundle(args.verify_bundle)
-        if result["valid"]:
-            print(f"Bundle verification: PASS · {result['files_verified']} payload(s) verified · {args.verify_bundle.resolve()}")
-            return 0
-        print(f"Bundle verification: FAIL · {args.verify_bundle.resolve()}", file=sys.stderr)
-        for error in result["errors"]:
-            print(f"- {error}", file=sys.stderr)
-        return 1
+def _atomic_write_text(destination: Path, content: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    os.close(descriptor)
     try:
-        trace = args.trace or newest_codex_session()
+        Path(temporary).write_text(content, encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = True) -> int:
+    try:
         run = parse_trace(trace)
         baseline = parse_trace(args.compare) if args.compare else None
         if args.suppress:
@@ -125,10 +133,10 @@ def main(argv: list[str] | None = None) -> int:
         gate = quality_gate["summary"]
         print(f"Quality gate: {'passed' if quality_gate['passed'] else 'FAILED'} · {gate['passed']} passed · {gate['failed']} failed")
     if args.normalized_output:
-        args.normalized_output.write_text(json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(args.normalized_output, json.dumps(export, indent=2, ensure_ascii=False))
         print(f"Normalized JSON: {args.normalized_output.resolve()}")
     if args.summary_output:
-        args.summary_output.write_text(render_markdown_summary(run, comparison, quality_gate), encoding="utf-8")
+        _atomic_write_text(args.summary_output, render_markdown_summary(run, comparison, quality_gate))
         print(f"Summary: {args.summary_output.resolve()}")
     if args.bundle:
         bundle = write_evidence_bundle(run, args.bundle, comparison=comparison, quality_gate=quality_gate)
@@ -139,11 +147,61 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"backtrace-agent: {exc}", file=sys.stderr)
             return 2
-        args.brief_output.write_text(brief, encoding="utf-8")
+        _atomic_write_text(args.brief_output, brief)
         print(f"Restart brief: {args.brief_output.resolve()}")
-    if args.open:
+    if args.open and allow_open:
         webbrowser.open(report.resolve().as_uri())
     return 1 if quality_gate["configured"] and not quality_gate["passed"] else 0
+
+
+def _watch(args: argparse.Namespace, trace: Path, *, _sleep=time.sleep, _max_cycles: int | None = None) -> int:
+    last_signature: tuple[int, int] | None = None
+    last_exit = 0
+    opened = False
+    cycles = 0
+    print(f"Watching: {trace.resolve()} · every {args.watch_interval:g}s · Ctrl-C to stop")
+    try:
+        while True:
+            try:
+                stat = trace.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+            except OSError as exc:
+                print(f"backtrace-agent: {exc}", file=sys.stderr)
+                return 2
+            if signature != last_signature:
+                print(f"Trace changed: {stat.st_size:,} bytes · regenerating")
+                last_exit = _process_once(args, trace, allow_open=not opened)
+                opened = opened or last_exit != 2
+                last_signature = signature
+            cycles += 1
+            if _max_cycles is not None and cycles >= _max_cycles:
+                return last_exit
+            _sleep(args.watch_interval)
+    except KeyboardInterrupt:
+        print(f"Watch stopped · last exit status {last_exit}")
+        return last_exit
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.verify_bundle:
+        if args.trace or args.watch:
+            print("backtrace-agent: do not pass a trace or --watch with --verify-bundle", file=sys.stderr)
+            return 2
+        result = verify_evidence_bundle(args.verify_bundle)
+        if result["valid"]:
+            print(f"Bundle verification: PASS · {result['files_verified']} payload(s) verified · {args.verify_bundle.resolve()}")
+            return 0
+        print(f"Bundle verification: FAIL · {args.verify_bundle.resolve()}", file=sys.stderr)
+        for error in result["errors"]:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+    try:
+        trace = args.trace or newest_codex_session()
+    except (OSError, ValueError) as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    return _watch(args, trace) if args.watch else _process_once(args, trace)
 
 
 if __name__ == "__main__":
