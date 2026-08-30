@@ -15,6 +15,12 @@ from .core import build_restart_brief, detect_signals, parse_trace, suppress_con
 from .report import write_report
 
 
+INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructive_actions", "max_repetitions", "max_stalls", "max_total_tokens"}
+NUMBER_POLICY_KEYS = {"max_failure_rate", "max_tokens_per_action", "min_cache_ratio"}
+BOOLEAN_POLICY_KEYS = {"require_evidence", "fail_on_regression"}
+POLICY_KEYS = INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS | BOOLEAN_POLICY_KEYS
+
+
 def nonnegative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
@@ -47,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--normalized-output", type=Path, help="Write privacy-safe normalized JSON")
     parser.add_argument("--summary-output", type=Path, help="Write an evidence-backed Markdown run summary")
     parser.add_argument("--bundle", type=Path, metavar="ZIP", help="Write a sanitized evidence bundle with report, JSON, summary, and hash manifest")
+    parser.add_argument("--policy", type=Path, metavar="JSON", help="Load reusable quality-gate thresholds from a validated JSON policy")
     parser.add_argument("--compare", type=Path, metavar="BASELINE", help="Compare this run with a baseline JSON/JSONL trace")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
@@ -75,6 +82,49 @@ def newest_codex_session() -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def load_policy(path: Path) -> dict:
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read policy {path}: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("Policy must be a JSON object.")
+    unknown = sorted(set(policy) - POLICY_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown policy key(s): {', '.join(unknown)}")
+    for key, value in policy.items():
+        if key in BOOLEAN_POLICY_KEYS and not isinstance(value, bool):
+            raise ValueError(f"Policy key {key} must be true or false.")
+        if key in INTEGER_POLICY_KEYS and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"Policy key {key} must be a nonnegative integer.")
+        if key in NUMBER_POLICY_KEYS and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
+            raise ValueError(f"Policy key {key} must be a nonnegative number.")
+    return policy
+
+
+def build_policy_spec(args: argparse.Namespace) -> dict:
+    policy = load_policy(args.policy) if args.policy else {}
+    cli_values = {
+        "max_failures": args.max_failures,
+        "max_unresolved_failures": args.max_unresolved_failures,
+        "max_destructive_actions": args.max_destructive_actions,
+        "max_repetitions": args.max_repetitions,
+        "max_stalls": args.max_stalls,
+        "max_failure_rate": args.max_failure_rate,
+        "max_total_tokens": args.max_total_tokens,
+        "max_tokens_per_action": args.max_tokens_per_action,
+        "min_cache_ratio": args.min_cache_ratio,
+    }
+    policy.update({key: value for key, value in cli_values.items() if value is not None})
+    if args.require_evidence:
+        policy["require_evidence"] = True
+    if args.fail_on_regression:
+        policy["fail_on_regression"] = True
+    if args.fail_on_errors:
+        policy["max_failures"] = 0
+    return policy
+
+
 def _atomic_write_text(destination: Path, content: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
@@ -93,26 +143,16 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
         if args.suppress:
             run = suppress_content(run, args.suppress)
             baseline = suppress_content(baseline, args.suppress) if baseline else None
+        policy_spec = build_policy_spec(args)
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
         return 2
     signals = detect_signals(run.events)
     analysis = analyze_run(run)
     comparison = compare_runs(run, baseline) if baseline else None
-    policy_spec = {
-        "max_failures": 0 if args.fail_on_errors else args.max_failures,
-        "max_unresolved_failures": args.max_unresolved_failures,
-        "max_destructive_actions": args.max_destructive_actions,
-        "max_repetitions": args.max_repetitions,
-        "max_stalls": args.max_stalls,
-        "max_failure_rate": args.max_failure_rate,
-        "require_evidence": args.require_evidence,
-        "fail_on_regression": args.fail_on_regression,
-        "max_total_tokens": args.max_total_tokens,
-        "max_tokens_per_action": args.max_tokens_per_action,
-        "min_cache_ratio": args.min_cache_ratio,
-    }
     quality_gate = evaluate_policy(run, policy_spec, comparison)
+    if args.policy:
+        quality_gate["policy_source"] = args.policy.name
     export = {"run": run.as_dict(), "analysis": analysis, "comparison": comparison, "quality_gate": quality_gate}
     if args.json:
         print(json.dumps(export, indent=2, ensure_ascii=False))
@@ -132,6 +172,8 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     if quality_gate["configured"]:
         gate = quality_gate["summary"]
         print(f"Quality gate: {'passed' if quality_gate['passed'] else 'FAILED'} · {gate['passed']} passed · {gate['failed']} failed")
+        if args.policy:
+            print(f"Policy: {args.policy.resolve()}")
     if args.normalized_output:
         _atomic_write_text(args.normalized_output, json.dumps(export, indent=2, ensure_ascii=False))
         print(f"Normalized JSON: {args.normalized_output.resolve()}")

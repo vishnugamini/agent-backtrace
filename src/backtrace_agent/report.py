@@ -178,7 +178,8 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
             f'<div class="signal {"info" if check["passed"] else "error"}"><span class="signal-icon">{"✓" if check["passed"] else "!"}</span><span><strong>{html.escape(check["label"])}</strong><small>Actual: {html.escape(str(check["actual"]))} · Expected: {html.escape(check["expected"])}. {html.escape(check["detail"])}</small></span></div>'
             for check in quality_gate["checks"]
         )
-        gate_panel = f'<section class="panel" style="margin-top:18px"><div class="kicker">ENFORCEABLE QUALITY GATE · {gate_label}</div>{checks}</section>'
+        policy_source = f' · POLICY {html.escape(quality_gate["policy_source"])}' if quality_gate.get("policy_source") else ""
+        gate_panel = f'<section class="panel" style="margin-top:18px"><div class="kicker">ENFORCEABLE QUALITY GATE · {gate_label}{policy_source}</div>{checks}</section>'
         template = template.replace('<section class="view active" id="overview">', '<section class="view active" id="overview">' + gate_panel, 1)
     attention_panel = '<section class="panel" style="margin-bottom:18px"><div class="kicker">WHAT NEEDS ATTENTION</div><div id="attention"></div></section>'
     template = template.replace('<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', attention_panel + '<section class="panel"><div class="kicker">DIAGNOSTIC SIGNALS', 1)

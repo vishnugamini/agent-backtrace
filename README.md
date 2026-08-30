@@ -95,6 +95,16 @@ backtrace-agent current.jsonl \
 
 Configured checks are embedded in HTML, JSON, and Markdown with actual and expected values. The command exits `1` if any check fails and `0` when every check passes, making the result usable in GitHub Actions and other CI systems. `--fail-on-errors` remains a shorthand for `--max-failures 0`.
 
+Keep those rules in version control instead of repeating flags:
+
+```bash
+backtrace-agent current.jsonl \
+  --policy examples/strict-policy.json \
+  --max-failures 3
+```
+
+Policy files accept only documented gate keys, reject unknown keys and invalid types, and require nonnegative thresholds. Explicit CLI values override the corresponding file values; boolean CLI flags enable their checks. The policy filename is preserved in HTML, JSON, Markdown, and terminal output so a result can be traced back to its rule set.
+
 The **Incidents** view groups consecutive failed attempts by operation and only calls an incident recovered when the trace contains a later successful event for that same operation. It reports failed attempts, intervening work, related files, time to recovery, and operations still unresolved. Long-running development services are excluded from incident counts because stopping one is not evidence of a failed task.
 
 The **Side effects** view inventories durable or external mutations separately from ordinary inspection: repository commits and pushes, saved releases, deployments, installs, access changes, external writes, and explicit destructive commands. Read-only deployment status checks are excluded. `--max-destructive-actions` counts attempted destructive operations even when they fail, making it suitable for restrictive CI policies.

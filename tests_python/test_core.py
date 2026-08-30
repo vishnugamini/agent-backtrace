@@ -6,7 +6,7 @@ from zipfile import ZipFile
 import pytest
 
 from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
-from backtrace_agent.cli import _watch, build_parser, main
+from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
 from backtrace_agent.report import render_html
@@ -245,6 +245,25 @@ def test_watch_mode_regenerates_all_outputs_atomically(tmp_path):
     assert "## Agent activity" in summary.read_text()
     assert verify_evidence_bundle(bundle)["valid"] is True
     assert not list(tmp_path.glob(".watch-*"))
+
+
+def test_policy_file_is_strict_validated_overridable_and_embedded(tmp_path):
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps({"max_failures": 1, "max_unresolved_failures": 0, "require_evidence": True}))
+    assert load_policy(policy_path)["max_failures"] == 1
+    args = build_parser().parse_args(["trace.jsonl", "--policy", str(policy_path), "--max-failures", "3"])
+    assert build_policy_spec(args)["max_failures"] == 3
+    trace = codex_trace(tmp_path)
+    report = tmp_path / "policy-report.html"
+    normalized = tmp_path / "policy.json.out"
+    assert main([str(trace), "--policy", str(policy_path), "-o", str(report), "--normalized-output", str(normalized)]) == 0
+    exported = json.loads(normalized.read_text())
+    assert exported["quality_gate"]["policy_source"] == "policy.json"
+    assert "POLICY policy.json" in report.read_text()
+    invalid = tmp_path / "invalid-policy.json"
+    invalid.write_text(json.dumps({"max_failures": -1, "invented_gate": 2}))
+    assert main([str(trace), "--policy", str(invalid), "-o", str(tmp_path / "invalid.html")]) == 2
+    assert not (tmp_path / "invalid.html").exists()
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

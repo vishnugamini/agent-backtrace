@@ -521,5 +521,7 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
         lines.extend([f"- **{item['title']}** ({item['kind']}): {item['detail']}" for item in comparison["findings"]] or ["- No material normalized changes detected."])
     if quality_gate and quality_gate["configured"]:
         lines.extend(["", "## Quality gate", f"Result: **{'PASS' if quality_gate['passed'] else 'FAIL'}**."])
+        if quality_gate.get("policy_source"):
+            lines.append(f"Policy: `{quality_gate['policy_source']}`.")
         lines.extend([f"- {'PASS' if check['passed'] else 'FAIL'} — **{check['label']}**: actual `{check['actual']}`, expected `{check['expected']}`. {check['detail']}" for check in quality_gate["checks"]])
     return "\n".join(lines)
