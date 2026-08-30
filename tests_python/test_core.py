@@ -35,7 +35,7 @@ def codex_trace(tmp_path: Path) -> Path:
         {"type": "turn_context", "payload": {"turn_id": turn, "model": "gpt-test", "cwd": "/repo"}},
         {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn, "started_at": 2_000}},
         item("UserMessage", {"content": [{"text": "<in-app-browser-context>ignore me</in-app-browser-context>\n## My request:\nBuild the analyzer"}]}, 2_000_000),
-        item("CommandExecution", {"command": ["zsh", "-lc", "pytest -q"], "status": "failed", "exit_code": 1, "stderr": "1 failed token=ghp_abcdefghijklmnopqrstuvwxyz123456"}, 2_001_000),
+        item("CommandExecution", {"command": ["zsh", "-lc", "pytest -q"], "status": "failed", "exit_code": 1, "stderr": "1 failed token=ghp_abcdefghijklmnopqrstuvwxyz123456 access=la_abcdefghijklmnopqrstuvwxyz123456"}, 2_001_000),
         item("FileChange", {"changes": {"/repo/src/app.py": {"type": "update", "unified_diff": "--- a\n+++ b\n-old\n+new\n+more"}}}, 2_002_000),
         item("CommandExecution", {"command": ["zsh", "-lc", "pytest -q"], "status": "completed", "exit_code": 0, "stdout": "3 passed"}, 2_003_000),
         item("McpToolCall", {"server": "sites", "tool": "get_deployment_status", "status": "completed", "result": {"status": "succeeded"}}, 2_004_000),
@@ -65,6 +65,7 @@ def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
     assert run.events[2].metadata["additions"] == 2
     exported = json.dumps(run.as_dict())
     assert "ghp_" not in exported
+    assert "la_abcdefghijklmnopqrstuvwxyz" not in exported
     assert "raw" not in run.events[0].as_dict()
 
 

@@ -15,6 +15,7 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("openai_api_key", re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     ("site_credential", re.compile(r"\bart_v\d+_[A-Za-z0-9_-]{16,}\b"), "[REDACTED_SITE_CREDENTIAL]"),
+    ("sites_access_token", re.compile(r"\bla_[A-Za-z0-9_-]{24,}\b"), "[REDACTED_SITES_ACCESS_TOKEN]"),
     ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[REDACTED_AWS_KEY]"),
     ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"), "Bearer [REDACTED]"),
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),

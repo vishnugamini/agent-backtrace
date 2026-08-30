@@ -31,6 +31,7 @@ const secretPatterns = [
   [/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_API_KEY]"],
   [/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]"],
   [/\bart_v\d+_[A-Za-z0-9_-]{16,}\b/g, "[REDACTED_SITE_CREDENTIAL]"],
+  [/\bla_[A-Za-z0-9_-]{24,}\b/g, "[REDACTED_SITES_ACCESS_TOKEN]"],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi, "Bearer [REDACTED]"],
   [/(?:api[_-]?key|token|secret|password)(\s*[=:]\s*)["']?(?!\[REDACTED)[^\s,"']{8,}/gi, "$1[REDACTED]"],
 ] as const;
