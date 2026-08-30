@@ -117,7 +117,7 @@ export default function Home() {
       <section className="how" id="why">
         <div><div className="eyebrow"><span /> FROM LOG TO DECISION</div><h2>Processing lives in Python.<br />The report travels anywhere.</h2></div>
         <div className="steps"><article><b>01</b><h3>Normalize</h3><p>Loose JSON and JSONL shapes become one event model without vendor lock-in.</p></article><article><b>02</b><h3>Diagnose</h3><p>Repeated actions, failed steps, stalls, agents, and touched files surface automatically.</p></article><article><b>03</b><h3>Resume</h3><p>Pick a checkpoint and export the context an agent needs to continue safely.</p></article></div>
-        <div className="terminal"><div><span /><span /><span /></div><code><i>$</i> pip install agent-backtrace<br /><i>$</i> backtrace-agent ~/.codex/sessions/run.jsonl -o report.html<br /><em>Report: report.html<br />Events: 184 · Agents: 4 · Signals: 3</em></code></div>
+        <div className="terminal"><div><span /><span /><span /></div><code><i>$</i> pip install git+https://github.com/vishnugamini/agent-backtrace.git<br /><i>$</i> backtrace-agent ~/.codex/sessions/run.jsonl -o report.html<br /><em>Report: report.html<br />Events: 184 · Agents: 4 · Signals: 3</em></code></div>
       </section>
 
       <footer><a className="brand" href="#top"><span className="brandMark">B</span><span>BACKTRACE</span></a><p>Open source · MIT licensed · Built for curious humans supervising capable agents.</p><a href="https://github.com/vishnugamini/agent-backtrace">View source ↗</a></footer>
