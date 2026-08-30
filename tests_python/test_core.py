@@ -41,7 +41,7 @@ def codex_trace(tmp_path: Path) -> Path:
         item("CommandExecution", {"command": ["zsh", "-lc", "pytest -q"], "status": "completed", "exit_code": 0, "stdout": "3 passed"}, 2_003_000),
         item("McpToolCall", {"server": "sites", "tool": "get_deployment_status", "status": "completed", "result": {"status": "succeeded"}}, 2_004_000),
         {"type": "response_item", "payload": {"type": "function_call", "arguments": "ignored low-level duplicate"}},
-        {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 100, "cached_input_tokens": 40}}}},
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 100, "input_tokens": 80, "cached_input_tokens": 40, "output_tokens": 20, "reasoning_output_tokens": 10}}}},
         {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn, "completed_at": 2_006, "last_agent_message": "Built and verified."}},
     ], "codex.jsonl")
 
@@ -76,6 +76,10 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert analysis["files"][0]["path"] == "src/app.py"
     assert {item["title"] for item in analysis["completion_evidence"]} == {"Ran test suite", "Checked deployment"}
     assert "Files changed: 1" in render_markdown_summary(parse_trace(codex_trace(tmp_path)))
+    assert analysis["tokens"]["uncached_input_tokens"] == 40
+    assert analysis["tokens"]["input_cache_ratio_percent"] == 50.0
+    assert analysis["tokens"]["tokens_per_action"] == 25.0
+    assert analysis["tokens"]["reasoning_share_percent"] == 50.0
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):
@@ -133,6 +137,21 @@ def test_quality_gate_is_explainable_and_rendered(tmp_path):
     assert "QUALITY GATE FAIL" in report
     assert "ENFORCEABLE QUALITY GATE · FAIL" in report
     assert "## Quality gate" in render_markdown_summary(run, quality_gate=gate)
+    token_gate = evaluate_policy(run, {"max_total_tokens": 99, "max_tokens_per_action": 30, "min_cache_ratio": 50})
+    assert token_gate["passed"] is False
+    assert token_gate["summary"] == {"passed": 2, "failed": 1}
+    token_report = render_html(run)
+    assert 'data-view="tokens"' in token_report
+    assert "TOKEN ECONOMICS" in token_report
+
+
+def test_missing_token_counters_are_explicit_and_do_not_create_empty_view(tmp_path):
+    run = parse_trace(generic_trace(tmp_path))
+    gate = evaluate_policy(run, {"max_total_tokens": 100, "max_tokens_per_action": 100, "min_cache_ratio": 50})
+    assert gate["passed"] is False
+    assert gate["summary"] == {"passed": 0, "failed": 3}
+    assert {check["actual"] for check in gate["checks"]} == {"unavailable"}
+    assert 'data-view="tokens"' not in render_html(run)
 
 
 def test_cli_quality_gate_controls_exit_status(tmp_path):

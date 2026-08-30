@@ -57,6 +57,22 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         template = template.replace(key, value)
     template = template.replace("FILES TOUCHED", "FILES CHANGED").replace(">Touches<", ">Changes<")
     template = template.replace("secret occurrence(s) redacted", "privacy protection(s) applied").replace("potential secret occurrence(s) removed", "potentially sensitive item(s) removed")
+    token_stats = analysis["tokens"]
+    if token_stats.get("total_tokens"):
+        template = template.replace("</nav>", '<button class="tab" data-view="tokens">Tokens</button></nav>')
+        token_cards = [
+            ("Recorded total", token_stats.get("total_tokens", 0), "tokens"),
+            ("Input", token_stats.get("input_tokens", 0), "tokens"),
+            ("Cached input", token_stats.get("cached_input_tokens", 0), "tokens"),
+            ("Uncached input", token_stats.get("uncached_input_tokens", 0), "tokens"),
+            ("Output", token_stats.get("output_tokens", 0), "tokens"),
+            ("Per action", token_stats.get("tokens_per_action", "unavailable"), "tokens"),
+            ("Input cache ratio", token_stats.get("input_cache_ratio_percent", "unavailable"), "%"),
+            ("Reasoning within output", token_stats.get("reasoning_share_percent", "unavailable"), "%"),
+        ]
+        cards = "".join(f'<article class="compare-metric"><span>{html.escape(label)}</span><strong>{html.escape(f"{value:,}" if isinstance(value, int) else str(value))} {unit}</strong></article>' for label, value, unit in token_cards)
+        token_view = f'<section class="view" id="tokens"><section class="panel"><div class="kicker">TOKEN ECONOMICS</div><h2>Where the recorded context went</h2><p class="objective">These are cumulative counters recovered from the trace, normalized where useful. They are not price or billing estimates.</p><div class="comparison-grid">{cards}</div></section></section>'
+        template = template.replace("</main>", token_view + "</main>")
     if quality_gate and quality_gate["configured"]:
         gate_class = "good" if quality_gate["passed"] else "warn"
         gate_label = "PASS" if quality_gate["passed"] else "FAIL"

@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-failure-rate", type=nonnegative_float, metavar="PERCENT", help="Fail when failed actions exceed this percentage of actions")
     parser.add_argument("--require-evidence", action="store_true", help="Require at least one successful test, build, package, push, or deployment proof")
     parser.add_argument("--fail-on-regression", action="store_true", help="Fail when --compare produces a regressed verdict")
+    parser.add_argument("--max-total-tokens", type=nonnegative_int, metavar="N", help="Fail when the recorded cumulative token counter exceeds N")
+    parser.add_argument("--max-tokens-per-action", type=nonnegative_float, metavar="N", help="Fail when recorded tokens per meaningful action exceed N")
+    parser.add_argument("--min-cache-ratio", type=nonnegative_float, metavar="PERCENT", help="Fail when cached input is below this percentage of input tokens")
     return parser
 
 
@@ -78,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
         "max_failure_rate": args.max_failure_rate,
         "require_evidence": args.require_evidence,
         "fail_on_regression": args.fail_on_regression,
+        "max_total_tokens": args.max_total_tokens,
+        "max_tokens_per_action": args.max_tokens_per_action,
+        "min_cache_ratio": args.min_cache_ratio,
     }
     quality_gate = evaluate_policy(run, policy_spec, comparison)
     export = {"run": run.as_dict(), "analysis": analysis, "comparison": comparison, "quality_gate": quality_gate}

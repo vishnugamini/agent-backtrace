@@ -75,8 +75,13 @@ def analyze_run(run: Run) -> dict[str, Any]:
             evidence.append({"event_id": event.id, "title": event.title, "at_ms": event.at_ms})
 
     total_tokens = run.tokens.get("total_tokens", 0)
+    input_tokens = run.tokens.get("input_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
+    output_tokens = run.tokens.get("output_tokens", 0)
+    reasoning_tokens = run.tokens.get("reasoning_output_tokens", 0)
     cache_ratio = round(cached / total_tokens * 100, 1) if total_tokens else None
+    input_cache_ratio = round(cached / input_tokens * 100, 1) if input_tokens else None
+    tokens_per_action = round(total_tokens / max(1, len(tool_events) + len(file_events)), 1) if total_tokens else None
     active_ms = sum(event.duration_ms for event in tool_events if not event.metadata.get("long_running"))
     attention_items = []
     for signal in signals:
@@ -109,7 +114,16 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "slowest_actions": [{"event_id": event.id, "title": event.title, "duration_ms": event.duration_ms, "operation": event.operation} for event in slowest],
         "completion_evidence": evidence,
         "attention_items": attention_items[:12],
-        "tokens": {**run.tokens, "cache_ratio_percent": cache_ratio},
+        "tokens": {
+            **run.tokens,
+            "uncached_input_tokens": max(0, input_tokens - cached),
+            "cache_ratio_percent": cache_ratio,
+            "input_cache_ratio_percent": input_cache_ratio,
+            "tokens_per_action": tokens_per_action,
+            "output_share_percent": round(output_tokens / total_tokens * 100, 1) if total_tokens else None,
+            "reasoning_share_percent": round(reasoning_tokens / output_tokens * 100, 1) if output_tokens else None,
+            "counter_scope": "recorded cumulative session usage; not a billing estimate",
+        },
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
         "privacy": {
             "redactions": run.privacy_findings,
@@ -158,6 +172,12 @@ def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
         metric("verification_per_turn", "Verification evidence per turn", len(baseline_analysis["completion_evidence"]) / baseline_turns, len(current_analysis["completion_evidence"]) / current_turns, "higher"),
         metric("files_changed", "Unique files changed", ba["files_changed"], ca["files_changed"], "neutral"),
     ]
+    baseline_token_stats, current_token_stats = baseline_analysis["tokens"], current_analysis["tokens"]
+    if baseline_token_stats.get("tokens_per_action") is not None and current_token_stats.get("tokens_per_action") is not None:
+        metrics.extend([
+            metric("tokens_per_action", "Recorded tokens per action", baseline_token_stats["tokens_per_action"], current_token_stats["tokens_per_action"], "lower", "tokens"),
+            metric("input_cache_ratio", "Input cache ratio", baseline_token_stats.get("input_cache_ratio_percent") or 0, current_token_stats.get("input_cache_ratio_percent") or 0, "higher", "%"),
+        ])
 
     def failed_operations(run: Run) -> set[str]:
         return {event.operation or event.title for event in run.events if event.status == "error"}
@@ -237,6 +257,22 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
         passed = comparison is not None and verdict != "regressed"
         detail = "No comparison baseline was supplied." if comparison is None else f"Comparison verdict: {verdict}."
         add("fail_on_regression", "Baseline regression", verdict, "not regressed", passed, detail)
+    token_stats = analysis["tokens"]
+    if policy.get("max_total_tokens") is not None:
+        limit = int(policy["max_total_tokens"])
+        recorded_total = token_stats.get("total_tokens")
+        actual = int(recorded_total) if recorded_total is not None else None
+        add("max_total_tokens", "Recorded cumulative tokens", actual if actual is not None else "unavailable", f"≤ {limit}", actual is not None and actual <= limit, "Uses the trace's cumulative session counter; this is not a billing estimate.")
+    if policy.get("max_tokens_per_action") is not None:
+        limit = float(policy["max_tokens_per_action"])
+        actual = token_stats.get("tokens_per_action")
+        passed = actual is not None and actual <= limit
+        add("max_tokens_per_action", "Recorded tokens per action", actual if actual is not None else "unavailable", f"≤ {limit:g}", passed, "Normalized cumulative tokens by meaningful tool and file actions.")
+    if policy.get("min_cache_ratio") is not None:
+        limit = float(policy["min_cache_ratio"])
+        actual = token_stats.get("input_cache_ratio_percent")
+        passed = actual is not None and actual >= limit
+        add("min_cache_ratio", "Input cache ratio", actual if actual is not None else "unavailable", f"≥ {limit:g}%", passed, "Cached input tokens divided by recorded input tokens.")
     return {
         "configured": bool(checks),
         "passed": all(check["passed"] for check in checks),

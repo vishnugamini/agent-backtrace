@@ -76,6 +76,17 @@ backtrace-agent current.jsonl \
 
 Configured checks are embedded in HTML, JSON, and Markdown with actual and expected values. The command exits `1` if any check fails and `0` when every check passes, making the result usable in GitHub Actions and other CI systems. `--fail-on-errors` remains a shorthand for `--max-failures 0`.
 
+When the trace contains token counters, the report adds a **Tokens** view with recorded cumulative input, cached input, uncached input, output, reasoning share, cache ratio, and tokens per meaningful action. Comparisons include normalized token efficiency, and CI can enforce it:
+
+```bash
+backtrace-agent run.jsonl \
+  --max-total-tokens 20000000 \
+  --max-tokens-per-action 80000 \
+  --min-cache-ratio 95
+```
+
+These are trace-reported cumulative counters, not billing or price estimates. Backtrace labels them accordingly and avoids inventing costs.
+
 Create a restart brief from a specific normalized event:
 
 ```bash
