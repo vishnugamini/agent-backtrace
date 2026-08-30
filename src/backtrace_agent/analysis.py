@@ -206,6 +206,21 @@ def analyze_run(run: Run) -> dict[str, Any]:
         })
     side_effect_categories = Counter(item["category"] for item in side_effect_items)
 
+    agent_activity = []
+    for agent in run.agents:
+        events = [event for event in run.events if event.agent == agent]
+        actions = [event for event in events if event.kind in {"tool", "file", "handoff", "error"}]
+        operations = Counter(event.operation for event in actions if event.operation)
+        agent_activity.append({
+            "agent": agent, "events": len(events), "actions": len(actions),
+            "failures": sum(event.status == "error" for event in events),
+            "measured_ms": sum(event.duration_ms for event in actions if not event.metadata.get("long_running")),
+            "files": sorted({path for event in events for path in event.files}),
+            "first_at_ms": min((event.at_ms for event in events), default=0),
+            "last_at_ms": max((event.at_ms + event.duration_ms for event in events), default=0),
+            "top_operation": operations.most_common(1)[0][0] if operations else None,
+        })
+
     total_tokens = run.tokens.get("total_tokens", 0)
     input_tokens = run.tokens.get("input_tokens", 0)
     cached = run.tokens.get("cached_input_tokens", 0)
@@ -271,6 +286,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
             "destructive_attempts": side_effect_categories["destructive"],
             "categories": [{"category": category, "count": count} for category, count in side_effect_categories.most_common()],
         },
+        "agents": agent_activity,
         "tokens": {
             **run.tokens,
             "uncached_input_tokens": max(0, input_tokens - cached),
@@ -460,6 +476,12 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
     ]
     for turn in analysis["turns"]:
         lines.extend([f"### {turn['request'] or 'Turn without recovered request'}", f"- Duration: {round(turn['duration_ms']/1000, 1)}s", f"- Actions: {turn['actions']}", f"- Files changed: {turn['files_changed']}", f"- Failures: {turn['failures']}", f"- Outcome: {turn['final_response'] or 'No final response recorded.'}", ""])
+    lines.append("## Agent activity")
+    lines.extend([
+        f"- **{item['agent']}** — {item['events']} events, {item['actions']} actions, {item['failures']} failed, {round(item['measured_ms']/1000, 1)}s measured, {len(item['files'])} files"
+        for item in analysis["agents"]
+    ] or ["- No agent attribution recovered."])
+    lines.append("")
     workflow = analysis["workflow"]
     lines.extend(["## Reconstructed workflow", f"Largest measured phase: **{workflow['dominant_phase'] or 'unavailable'}**. Latest action phase: **{workflow['current_phase'] or 'unavailable'}**."])
     lines.extend([

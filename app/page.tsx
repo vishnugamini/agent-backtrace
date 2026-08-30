@@ -64,7 +64,7 @@ export default function Home() {
       <section className="hero" id="top">
         <div className="eyebrow"><span /> PYTHON-POWERED AGENT FLIGHT RECORDER</div>
         <h1>See where your agent<br /><em>changed course.</em></h1>
-        <p className="lede">Turn raw agent JSONL logs into a navigable workflow of phases, decisions, tools, files, recovery chains, side effects, token efficiency, regressions, and quality gates—then bookmark or restart from any checkpoint.</p>
+        <p className="lede">Plot every agent on a shared clock, then inspect phases, tools, files, recovery chains, side effects, token efficiency, regressions, and quality gates—or restart from any checkpoint.</p>
         <div className="heroActions"><button className="primary" onClick={() => fileRef.current?.click()}>Open a trace <span>→</span></button><button className="secondary" onClick={loadDemo}>Try the demo run</button></div>
         <div className="privacy"><span>◆</span> Local by design · No upload · Secret redaction · Custom suppression · Python 3.10+</div>
       </section>
@@ -116,7 +116,7 @@ export default function Home() {
 
       <section className="how" id="why">
         <div><div className="eyebrow"><span /> FROM LOG TO DECISION</div><h2>Processing lives in Python.<br />The report travels anywhere.</h2></div>
-        <div className="steps"><article><b>01</b><h3>Normalize</h3><p>Loose JSON and JSONL shapes become one event model without vendor lock-in.</p></article><article><b>02</b><h3>Reconstruct</h3><p>See the run move through inspection, implementation, verification, and publishing.</p></article><article><b>03</b><h3>Diagnose</h3><p>Link failures to retries and audit pushes, deployments, installs, and destructive actions.</p></article><article><b>04</b><h3>Compare</h3><p>Measure a new run against a baseline with normalized regression and efficiency evidence.</p></article><article><b>05</b><h3>Gate</h3><p>Make CI fail on quality, recovery, destructive-action, or token limits and regressions.</p></article><article><b>06</b><h3>Resume</h3><p>Bookmark exact checkpoints, share deep links, or export context to continue safely.</p></article></div>
+        <div className="steps"><article><b>01</b><h3>Normalize</h3><p>Loose JSON and JSONL shapes become one event model without vendor lock-in.</p></article><article><b>02</b><h3>Map</h3><p>Plot every agent, event, handoff, file change, and failure on one shared clock.</p></article><article><b>03</b><h3>Diagnose</h3><p>Link failures to retries and audit pushes, deployments, installs, and destructive actions.</p></article><article><b>04</b><h3>Compare</h3><p>Measure a new run against a baseline with normalized regression and efficiency evidence.</p></article><article><b>05</b><h3>Gate</h3><p>Make CI fail on quality, recovery, destructive-action, or token limits and regressions.</p></article><article><b>06</b><h3>Resume</h3><p>Bookmark exact checkpoints, share deep links, or export context to continue safely.</p></article></div>
         <div className="terminal"><div><span /><span /><span /></div><code><i>$</i> pip install git+https://github.com/vishnugamini/agent-backtrace.git<br /><i>$</i> backtrace-agent current.jsonl --compare baseline.jsonl <br />&nbsp;&nbsp;--max-failure-rate 5 --require-evidence --fail-on-regression<br /><em>Quality gate: passed · 3 passed · 0 failed<br />Report: backtrace-report.html</em></code></div>
       </section>
 

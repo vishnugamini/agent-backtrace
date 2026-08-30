@@ -89,8 +89,13 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert analysis["incidents"]["unresolved"] == 0
     assert analysis["incidents"]["median_recovery_ms"] == 2000
     assert analysis["incidents"]["items"][0]["files"] == ["src/app.py"]
+    agents = {item["agent"]: item for item in analysis["agents"]}
+    assert set(agents) == {"user", "codex"}
+    assert agents["codex"]["actions"] == 4
+    assert agents["codex"]["failures"] == 1
     markdown = render_markdown_summary(parse_trace(codex_trace(tmp_path)))
     assert "## Reconstructed workflow" in markdown
+    assert "## Agent activity" in markdown
     assert "## Token economics" in markdown
     assert "## Failure incidents" in markdown
 
@@ -223,6 +228,9 @@ def test_report_is_self_contained_and_useful(tmp_path):
     assert 'data-view="review"' in report
     assert "backtrace-review:" in report
     assert "#event=" in report
+    assert 'data-view="map"' in report
+    assert "TIME-SCALED AGENT MOVEMENT" in report
+    assert "AGENT WORKLOAD" in report
     assert "FILES CHANGED" in report
     assert "WHAT NEEDS ATTENTION" in report
     assert r"<\/script>" in render_html(parse_trace('\n'.join([

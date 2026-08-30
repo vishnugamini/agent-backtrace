@@ -16,6 +16,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Reconstruct turns, commands, durations, exit codes, changed files, and reported outcomes.
 - Flag repeated actions, failed steps, recoveries, slow actions, and unexplained stalls.
 - Reconstruct the run into understandable workflow phases and show how the agent moved between them.
+- Plot every meaningful event on time-scaled, clickable lanes for each participating agent.
 - Link failed attempts to later successful retries, separating recovered incidents from unresolved ones.
 - Audit consequential actions such as pushes, deployments, installs, access changes, and destructive commands in a dedicated side-effect ledger.
 - Separate files actually changed from paths merely mentioned in command output.
@@ -119,11 +120,14 @@ The generated HTML report is self-contained: no server, database, API key, CDN, 
 2. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
 3. Open **Incidents** to separate recovered failures from unresolved operations and inspect their recovery chains.
 4. Audit **Side effects** to see what the agent changed outside its own working memory.
-5. Filter and search the meaningful timeline by kind, status, or user turn.
-6. Inspect exact commands, sanitized output, duration, exit code, and related files.
-7. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
-8. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
-9. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
+5. Use **Agent map** to see when each agent spoke, reasoned, used tools, changed files, handed off, or failed on a shared run clock.
+6. Filter and search the meaningful timeline by kind, status, or user turn.
+7. Inspect exact commands, sanitized output, duration, exit code, and related files.
+8. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
+9. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
+10. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
+
+The map includes per-agent action, failure, measured-time, file, and top-operation summaries. Event marks remain clickable even on a dense run, opening the same checkpoint inspector and review actions used elsewhere in the report.
 
 Every event has a **Copy checkpoint link** action. Opening that self-contained report URL restores the exact event inspector through a `#event=...` fragment. You can also bookmark events into a local **Review** queue and export the selected sanitized checkpoints as JSON. Bookmarks use browser-local storage scoped to the report session; they do not edit the report or source trace.
 
