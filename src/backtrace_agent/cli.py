@@ -553,7 +553,8 @@ def _scan(args: argparse.Namespace) -> int:
             investigation = fleet["investigation"]
             print(
                 f"Fleet investigations: {investigation['reports_written']} report(s) · "
-                f"{investigation['scope']} scope · {investigation['unresolved_incidents']} incident link(s) · manifest written"
+                f"{investigation['scope']} scope · {investigation['unresolved_incidents']} incident link(s) · "
+                f"{investigation['restart_briefs_written']} restart brief(s) · manifest written"
             )
         if fleet["notification"]["configured"]:
             notification = fleet["notification"]

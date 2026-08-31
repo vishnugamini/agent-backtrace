@@ -42,7 +42,7 @@ test("keeps trace import and restart behavior in the client source", async () =>
   assert.match(page, /--investigation-dir fleet-investigations/);
   assert.match(page, /Fleet investigations: 3 linked reports/);
   assert.match(page, /Incident queue: 4 unresolved/);
-  assert.match(page, /exact-event deep links ready/);
+  assert.match(page, /exact-event links \+ restart briefs ready/);
   assert.match(page, /Fleet trend:/);
   assert.match(page, /--fail-on-fleet-regression/);
   assert.match(page, /Fleet gate: FAILED/);

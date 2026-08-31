@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 from .analysis import analyze_run
-from .core import parse_trace, suppress_content
+from .core import build_restart_brief, parse_trace, suppress_content
 from .report import write_report
 
 
@@ -56,6 +56,17 @@ def _short(value: str, length: int = 180) -> str:
 def _display_value(value: str, terms: Iterable[str]) -> str:
     folded = value.casefold()
     return "[suppressed]" if any(term.casefold() in folded for term in terms if term) else value
+
+
+def _atomic_write_text(destination: Path, content: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    os.close(descriptor)
+    try:
+        Path(temporary).write_text(content, encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def scan_traces(
@@ -236,6 +247,11 @@ def write_fleet_investigations(
                 continue
             event_id = incident["latest_failure_event_id"]
             fragment = f"#event={quote(event_id, safe='')}"
+            brief_identity = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:12]
+            brief_filename = f"restart-{identity}-{brief_identity}.md"
+            brief_path = destination / brief_filename
+            _atomic_write_text(brief_path, build_restart_brief(run, event_id) + "\n")
+            brief_link = os.path.relpath(brief_path, dashboard_path.parent).replace(os.sep, "/")
             incident_queue.append({
                 "id": incident["id"],
                 "run_id": item["id"],
@@ -246,7 +262,9 @@ def write_fleet_investigations(
                 "intervening_actions": incident["intervening_actions"],
                 "risk_score": item["risk_score"],
                 "report": link + fragment,
+                "brief": brief_link,
                 "_manifest_report": filename + fragment,
+                "_manifest_brief": brief_filename,
             })
         manifest_runs.append({
             "id": item["id"],
@@ -274,6 +292,7 @@ def write_fleet_investigations(
             "event_id": incident["event_id"],
             "failed_attempts": incident["failed_attempts"],
             "report": incident.pop("_manifest_report"),
+            "brief": incident.pop("_manifest_brief"),
         }
         for incident in incident_queue
     ]
@@ -286,19 +305,14 @@ def write_fleet_investigations(
         "unresolved_incidents": manifest_incidents,
     }
     manifest_path = destination / "manifest.json"
-    descriptor, temporary = tempfile.mkstemp(prefix=".manifest.", dir=destination)
-    os.close(descriptor)
-    try:
-        Path(temporary).write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(temporary, manifest_path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    _atomic_write_text(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     result = {
         "configured": True,
         "scope": scope,
         "eligible_runs": eligible,
         "reports_written": len(manifest_runs),
         "unresolved_incidents": len(incident_queue),
+        "restart_briefs_written": len(incident_queue),
         "manifest": os.path.relpath(manifest_path, dashboard_path.parent).replace(os.sep, "/"),
     }
     fleet["investigation"] = result
@@ -508,9 +522,9 @@ const time=v=>new Date(v).toLocaleString(),duration=ms=>ms>=60000?`${(ms/60000).
     gate_css = '.fleet-gate{margin:0 0 28px;padding:20px;border:1px solid #9ab8a7;border-left:6px solid var(--green);background:#eef5ef}.fleet-gate.fail{border-color:#d39b8f;border-left-color:var(--red);background:#fbefec}.gate-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.gate-head h2{font:27px Georgia,serif;margin:4px 0}.gate-result{font:800 12px monospace;border:1px solid currentColor;border-radius:999px;padding:7px 10px;color:var(--green)}.fleet-gate.fail .gate-result{color:var(--red)}.gate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}.gate-check{padding:12px;background:var(--surface);border:1px solid var(--line)}.gate-check.fail{border-color:#d39b8f}.gate-check.skip{border-style:dashed}.gate-check strong,.gate-check span,.gate-check small{display:block}.gate-check span{font:9px monospace;color:var(--muted);margin-top:5px}.gate-check small{margin-top:5px;color:#52605a}.delivery{margin:14px 0 0;padding:9px 11px;background:#fffdf799;border-left:3px solid var(--blue);font:11px monospace}.delivery.failed{border-left-color:var(--red)}.delivery.skipped{border-left-color:var(--amber)}.investigation-pack{margin:0 0 28px;padding:20px;border:1px solid #9cb6c9;border-left:6px solid var(--blue);background:#eef4f8;display:flex;align-items:center;justify-content:space-between;gap:20px}.investigation-pack[hidden]{display:none}.investigation-pack h2{font:27px Georgia,serif;margin:4px 0}.investigation-pack p{margin:4px 0;color:#52616b}.investigation-pack .button{text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center}'
     gate_html = '<section class="fleet-gate" id="fleet-gate" hidden><div class="gate-head"><div><div class="kicker">AUTOMATION DECISION</div><h2 id="gate-title"></h2><p id="gate-summary"></p></div><span class="gate-result" id="gate-result"></span></div><div class="gate-grid" id="gate-checks"></div><p class="delivery" id="notification-status" hidden></p></section><section class="investigation-pack" id="investigation-pack" hidden><div><div class="kicker">LINKED INVESTIGATION PACK</div><h2>Open the run, not another command</h2><p id="investigation-summary"></p></div><a class="button secondary" id="manifest-link" target="_blank" rel="noopener">Open manifest</a></section>'
     gate_js = '''const G=F.quality_gate,N=F.notification;if(G?.configured){const gate=$('#fleet-gate');gate.hidden=false;gate.classList.toggle('fail',!G.passed);$('#gate-title').textContent=G.passed?'Fleet gate passed':'Fleet gate failed';$('#gate-result').textContent=G.passed?'PASS':'FAIL';const provenance=G.policy_source?` Policy ${G.policy_source}.`:'';$('#gate-summary').textContent=`${G.summary.passed} passed · ${G.summary.failed} failed · ${G.summary.skipped} skipped.${provenance} Failed configured checks return exit code 1.`;$('#gate-checks').innerHTML=G.checks.map(c=>`<article class="gate-check ${c.skipped?'skip':c.passed?'':'fail'}"><strong>${esc(c.label)}</strong><span>Actual ${esc(c.actual)} · expected ${esc(c.expected)}</span><small>${esc(c.detail)}</small></article>`).join('');if(N?.configured){const delivery=$('#notification-status'),written=N.payload_written?' · exact payload written':'';delivery.hidden=false;delivery.classList.add(N.status);delivery.textContent=N.status==='delivered'?`${N.format} webhook delivered in ${N.attempts} attempt(s) · HTTP ${N.status_code} · ${N.event_id}${written}`:N.status==='skipped'?`${N.format} webhook skipped · ${N.error}${written}`:N.status==='previewed'?`${N.format} webhook previewed without a network request · ${N.event_id}${written}`:`${N.format} webhook delivery failed after ${N.attempts} attempt(s) · ${N.error}${written}`}}if(F.investigation?.configured){$('#investigation-pack').hidden=false;$('#investigation-summary').textContent=`${F.investigation.reports_written} full report(s) generated for ${F.investigation.scope==='all'?'all readable runs':'runs needing attention'}. Select a linked run below or inspect the privacy-minimized manifest.`;$('#manifest-link').href=F.investigation.manifest;}'''
-    gate_css += '.incident-queue{margin:0 0 28px;padding:20px;border:1px solid #d5b48b;border-left:6px solid var(--amber);background:#fbf3e6}.incident-queue[hidden]{display:none}.incident-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.incident-head h2{font:27px Georgia,serif;margin:4px 0}.incident-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.fleet-incident{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);padding:13px}.fleet-incident:hover{border-color:var(--amber);transform:translateY(-1px)}.fleet-incident strong,.fleet-incident span,.fleet-incident small,.fleet-incident b{display:block}.fleet-incident span{font:9px monospace;color:var(--muted);margin:5px 0}.fleet-incident small{color:#52605a}.fleet-incident b{font:800 9px monospace;color:var(--green);margin-top:9px;letter-spacing:.05em}'
+    gate_css += '.incident-queue{margin:0 0 28px;padding:20px;border:1px solid #d5b48b;border-left:6px solid var(--amber);background:#fbf3e6}.incident-queue[hidden]{display:none}.incident-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.incident-head h2{font:27px Georgia,serif;margin:4px 0}.incident-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.fleet-incident{background:var(--surface);border:1px solid var(--line);padding:13px}.fleet-incident:hover{border-color:var(--amber);transform:translateY(-1px)}.fleet-incident strong,.fleet-incident span,.fleet-incident small{display:block}.fleet-incident span{font:9px monospace;color:var(--muted);margin:5px 0}.fleet-incident small{color:#52605a}.incident-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.incident-action{font:800 9px monospace;color:var(--green);letter-spacing:.04em;text-decoration:none;border:1px solid #9ab8a7;padding:6px 8px;border-radius:3px}.incident-action.primary{background:var(--green);color:white;border-color:var(--green)}'
     gate_html += '<section class="incident-queue" id="incident-queue" hidden><div class="incident-head"><div><div class="kicker">UNRESOLVED INCIDENT QUEUE</div><h2>Jump to the exact failure</h2><p>Ranked by run risk, failed attempts, and work performed afterward.</p></div><span class="pill warn" id="incident-count"></span></div><div class="incident-list" id="incident-list"></div></section>'
-    gate_js += '''if(F.incident_queue?.length){$('#incident-queue').hidden=false;$('#incident-count').textContent=`${F.incident_queue.length} unresolved`;$('#incident-list').innerHTML=F.incident_queue.map(i=>{const run=F.runs.find(r=>r.id===i.run_id);return `<a class="fleet-incident" href="${esc(i.report)}" target="_blank" rel="noopener"><strong>${esc(i.operation)}</strong><span>${esc(run?.name||i.run_id)} · risk ${i.risk_score} · ${i.failed_attempts} failed attempt(s) · ${i.intervening_actions} later action(s)</span><small>${esc(i.detail||'No failure detail recovered.')}</small><b>OPEN EXACT FAILURE →</b></a>`}).join('');}'''
+    gate_js += '''if(F.incident_queue?.length){$('#incident-queue').hidden=false;$('#incident-count').textContent=`${F.incident_queue.length} unresolved`;$('#incident-list').innerHTML=F.incident_queue.map(i=>{const run=F.runs.find(r=>r.id===i.run_id);return `<article class="fleet-incident"><strong>${esc(i.operation)}</strong><span>${esc(run?.name||i.run_id)} · risk ${i.risk_score} · ${i.failed_attempts} failed attempt(s) · ${i.intervening_actions} later action(s)</span><small>${esc(i.detail||'No failure detail recovered.')}</small><div class="incident-actions"><a class="incident-action primary" href="${esc(i.report)}" target="_blank" rel="noopener">OPEN EXACT FAILURE →</a><a class="incident-action" href="${esc(i.brief)}" target="_blank" rel="noopener">OPEN RESTART BRIEF →</a></div></article>`}).join('');}'''
     template = template.replace('.trend{', gate_css + '.trend{', 1)
     template = template.replace('<section class="trend" id="trend" hidden>', gate_html + '<section class="trend" id="trend" hidden>', 1)
     template = template.replace("if(F.history){", gate_js + "if(F.history){", 1)

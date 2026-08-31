@@ -541,6 +541,7 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
         "eligible_runs": 1,
         "reports_written": 1,
         "unresolved_incidents": 1,
+        "restart_briefs_written": 1,
         "manifest": "investigations/manifest.json",
     }
     assert "_source_path" not in json.dumps(fleet)
@@ -553,18 +554,25 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
     incident = fleet["incident_queue"][0]
     assert incident["run_id"] == linked[0]["id"]
     assert incident["report"].startswith(linked[0]["investigation_report"] + "#event=")
+    brief_path = (dashboard.parent / incident["brief"]).resolve()
+    assert brief_path.exists()
+    brief_text = brief_path.read_text()
+    assert f"Checkpoint: {incident['event_id']}" in brief_text
+    assert "## Resume exactly here" in brief_text
+    assert "private needle" not in brief_text
     linked_report_text = linked_report.read_text()
     assert incident["event_id"] in linked_report_text
     assert "location.hash.startsWith('#event=')" in linked_report_text
     assert set(incident) == {
         "id", "run_id", "operation", "detail", "event_id", "failed_attempts",
-        "intervening_actions", "risk_score", "report",
+        "intervening_actions", "risk_score", "report", "brief",
     }
     dashboard_text = dashboard.read_text()
     assert "LINKED INVESTIGATION PACK" in dashboard_text
     assert "Open investigation" in dashboard_text
     assert "UNRESOLVED INCIDENT QUEUE" in dashboard_text
     assert "OPEN EXACT FAILURE" in dashboard_text
+    assert "OPEN RESTART BRIEF" in dashboard_text
     assert ".investigation-pack[hidden]{display:none}" in dashboard_text
     assert "report ready" in dashboard_text
     assert '"reports_written": 1' in dashboard_text
@@ -572,7 +580,7 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
     manifest = json.loads((details / "manifest.json").read_text())
     assert manifest["scope"] == "attention" and len(manifest["reports"]) == 1
     assert len(manifest["unresolved_incidents"]) == 1
-    assert set(manifest["unresolved_incidents"][0]) == {"id", "run_id", "event_id", "failed_attempts", "report"}
+    assert set(manifest["unresolved_incidents"][0]) == {"id", "run_id", "event_id", "failed_attempts", "report", "brief"}
     minimized = json.dumps(manifest)
     assert str(root) not in minimized
     assert "clean.jsonl" not in minimized and "failed.jsonl" not in minimized
@@ -585,7 +593,7 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
         "--scan", str(root), "--investigation-dir", str(all_details),
         "--investigation-scope", "all", "-o", str(all_dashboard),
     ]) == 0
-    assert "Fleet investigations: 2 report(s) · all scope · 1 incident link(s) · manifest written" in capsys.readouterr().out
+    assert "Fleet investigations: 2 report(s) · all scope · 1 incident link(s) · 1 restart brief(s) · manifest written" in capsys.readouterr().out
     assert len(json.loads((all_details / "manifest.json").read_text())["reports"]) == 2
 
     invalid_destination = tmp_path / "not-a-directory"
