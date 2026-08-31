@@ -91,6 +91,22 @@ backtrace-agent --scan ~/.codex/sessions \
 
 Fleet gates are included in HTML and `--json`, and a failed configured check returns exit code 1. Current-state gates cover runs needing attention, unresolved incidents, and source-integrity issues. Trend gates cover new risky runs and worsened run statuses. Trend checks are explicitly skipped on the first snapshot because there is no previous scan to compare; JUnit preserves that skipped state instead of reporting invented evidence.
 
+Notify an external automation without putting its URL or secret in shell history:
+
+```bash
+export BACKTRACE_WEBHOOK_URL="https://automation.example/hooks/backtrace"
+export BACKTRACE_WEBHOOK_SECRET="replace-with-a-shared-secret"
+
+backtrace-agent --scan ~/.codex/sessions \
+  --max-fleet-unresolved 0 \
+  --webhook-url-env BACKTRACE_WEBHOOK_URL \
+  --webhook-signing-secret-env BACKTRACE_WEBHOOK_SECRET \
+  --notify-on failure \
+  -o session-fleet.html
+```
+
+Webhook payloads contain only aggregate fleet counts, gate checks, trend deltas, timestamps, and a deterministic event ID—never paths, prompts, objectives, model names, run names, or raw events. Destinations must use HTTPS except for localhost testing, embedded URL credentials are rejected, and redirects are refused. Optional HMAC-SHA256 signatures use `X-Backtrace-Signature`; `Idempotency-Key` stays stable across retries. Transient connection and 5xx failures retry with bounded exponential backoff. Delivery, skip, and failure states appear in HTML and `--json`; exhausted delivery failures return exit code 2. History snapshots are already committed before notification is attempted.
+
 Compare a new run with a known baseline:
 
 ```bash
@@ -373,7 +389,7 @@ app/ + lib/            Interactive demo
 
 - First-class Claude Code and OpenTelemetry adapters
 - User-defined signal and policy plugins
-- Notification integrations for fleet gate failures
+- Slack and Teams presentation adapters for fleet notifications
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.

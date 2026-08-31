@@ -1,6 +1,9 @@
 import json
 import hashlib
+import hmac
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
@@ -12,6 +15,7 @@ from backtrace_agent.ci import render_fleet_junit_xml, render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
 from backtrace_agent.fleet import discover_traces, evaluate_fleet_gate, render_fleet_html, scan_traces, update_fleet_history
+from backtrace_agent.notify import build_fleet_notification, deliver_webhook, validate_webhook_url
 from backtrace_agent.report import render_html
 
 
@@ -447,6 +451,100 @@ def test_fleet_gates_skip_missing_baselines_fail_ci_and_export_junit(tmp_path, c
     assert "trend gate options require --history" in capsys.readouterr().err
     assert main([str(failed), "--max-fleet-unresolved", "0"]) == 2
     assert "fleet gate options require --scan" in capsys.readouterr().err
+
+
+def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "secret-client-sessions"
+    root.mkdir()
+    write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "private roadmap prompt"}}], "secret-run.jsonl")
+    fleet = scan_traces(root, limit=10)
+    fleet["quality_gate"] = evaluate_fleet_gate(fleet, {
+        "max_fleet_needs_attention": 0,
+        "max_fleet_unresolved": None,
+        "max_fleet_source_issues": None,
+        "max_new_attention": None,
+        "fail_on_fleet_regression": False,
+    })
+    payload = build_fleet_notification(fleet)
+    serialized = json.dumps(payload)
+    assert payload["event"] == "fleet.gate"
+    assert payload["event_id"].startswith("fleet-")
+    for forbidden in ("secret-client", "secret-run", "private roadmap", str(root), "path", "objective", "model"):
+        assert forbidden not in serialized
+
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append((dict(self.headers), body))
+            self.send_response(500 if len(received) == 1 else 204)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/fleet"
+    try:
+        delivery = deliver_webhook(payload, url, signing_secret="test-secret", retries=1, backoff_seconds=0)
+        assert delivery["status"] == "delivered"
+        assert delivery["attempts"] == 2
+        assert delivery["status_code"] == 204
+        assert received[0][0]["Idempotency-Key"] == received[1][0]["Idempotency-Key"] == payload["event_id"]
+        expected_signature = "sha256=" + hmac.new(b"test-secret", received[1][1], hashlib.sha256).hexdigest()
+        assert received[1][0]["X-Backtrace-Signature"] == expected_signature
+        assert json.loads(received[1][1]) == payload
+
+        monkeypatch.setenv("BACKTRACE_TEST_WEBHOOK", url)
+        monkeypatch.setenv("BACKTRACE_TEST_SECRET", "test-secret")
+        report = tmp_path / "notified.html"
+        assert main([
+            "--scan", str(root), "--max-fleet-needs-attention", "0",
+            "--webhook-url-env", "BACKTRACE_TEST_WEBHOOK",
+            "--webhook-signing-secret-env", "BACKTRACE_TEST_SECRET",
+            "--notify-on", "always", "--webhook-retries", "0", "-o", str(report),
+        ]) == 0
+        assert "Fleet webhook: DELIVERED" in capsys.readouterr().out
+        report_text = report.read_text()
+        assert "Webhook delivered" in report_text
+        assert url not in report_text and "test-secret" not in report_text
+
+        before_skip = len(received)
+        assert main([
+            "--scan", str(root), "--max-fleet-needs-attention", "0",
+            "--webhook-url-env", "BACKTRACE_TEST_WEBHOOK", "-o", str(report),
+        ]) == 0
+        assert "Fleet webhook: SKIPPED" in capsys.readouterr().out
+        assert len(received) == before_skip
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    failed_delivery = deliver_webhook(payload, f"http://127.0.0.1:{server.server_port}/closed", retries=0, timeout=0.1)
+    assert failed_delivery["status"] == "failed"
+    assert failed_delivery["error"] == "Webhook connection failed or timed out."
+    with pytest.raises(ValueError, match="HTTPS"):
+        validate_webhook_url("http://example.com/hook")
+    with pytest.raises(ValueError, match="embedded credentials"):
+        validate_webhook_url("https://user:pass@example.com/hook")
+    monkeypatch.setattr("backtrace_agent.cli.deliver_webhook", lambda *args, **kwargs: {
+        "configured": True, "status": "failed", "attempts": 3, "status_code": 503,
+        "error": "Webhook returned HTTP 503.", "event_id": payload["event_id"],
+    })
+    failed_report = tmp_path / "failed-delivery.html"
+    assert main([
+        "--scan", str(root), "--max-fleet-needs-attention", "0",
+        "--webhook-url-env", "BACKTRACE_TEST_WEBHOOK", "--notify-on", "always", "-o", str(failed_report),
+    ]) == 2
+    assert "Fleet webhook: FAILED · 3 attempt(s) · HTTP 503" in capsys.readouterr().out
+    assert "Webhook delivery failed" in failed_report.read_text()
+    monkeypatch.delenv("MISSING_WEBHOOK", raising=False)
+    assert main(["--scan", str(root), "--max-fleet-needs-attention", "0", "--webhook-url-env", "MISSING_WEBHOOK"]) == 2
+    assert "MISSING_WEBHOOK is missing or empty" in capsys.readouterr().err
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):
