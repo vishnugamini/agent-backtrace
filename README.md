@@ -68,10 +68,14 @@ Triage many agent sessions at once:
 ```bash
 backtrace-agent --scan ~/.codex/sessions \
   --scan-limit 50 \
+  --history ~/.local/share/backtrace/fleet-history.json \
+  --history-limit 50 \
   -o session-fleet.html
 ```
 
 The fleet dashboard recursively selects the newest JSON/JSONL candidates, skips dependency/build directories and common project manifests, and summarizes each run without embedding raw provider records. Search by objective, model, session, or path; filter by status; sort by risk, recency, failures, or unresolved incidents; then copy a complete command for the selected trace. Select any readable session as a baseline, open another, and copy a shell-quoted `--compare` command directly from the dashboard. Suppressed and unreadable paths cannot become comparison inputs. Unreadable traces stay visible instead of disappearing. Risk is a transparent, capped triage heuristic based on source-integrity issues, unsupported provider items, unresolved incidents, destructive attempts, failures, repetition, and stalls—not a claim about agent quality. Add `--json` for structured automation output and repeatable `--suppress` terms before sharing the dashboard.
+
+Optional `--history` turns repeated scans into a bounded trend report: status regressions and improvements for the same run, new risky runs, aggregate deltas, and a recent-scan chart. A run that disappears is labeled **left scan window**, never recovered. The history file is replaced atomically and stores no prompts, objectives, models, source paths, filenames, or raw events—only timestamps, aggregate metrics, and SHA-256 run identities. Invalid existing history is left unchanged. The first scan records a baseline; later scans compare against the immediately previous snapshot.
 
 Compare a new run with a known baseline:
 
@@ -355,7 +359,7 @@ app/ + lib/            Interactive demo
 
 - First-class Claude Code and OpenTelemetry adapters
 - User-defined signal and policy plugins
-- Persistent trend history across fleet scans
+- Configurable retention and alert hooks for fleet trends
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.

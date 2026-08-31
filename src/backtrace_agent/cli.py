@@ -14,7 +14,7 @@ from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_pol
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
-from .fleet import scan_traces, write_fleet_report
+from .fleet import scan_traces, update_fleet_history, write_fleet_report
 from .report import write_report
 
 
@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify-source", type=Path, metavar="TRACE", help="With --verify-bundle, prove that TRACE matches the recorded source fingerprint")
     parser.add_argument("--scan", type=Path, metavar="DIR", help="Build a risk-ranked dashboard across recent JSON/JSONL traces below DIR")
     parser.add_argument("--scan-limit", type=positive_int, default=50, metavar="N", help="Maximum newest trace files to inspect with --scan (default: 50)")
+    parser.add_argument("--history", type=Path, metavar="JSON", help="With --scan, append a privacy-minimized snapshot and show fleet trends")
+    parser.add_argument("--history-limit", type=positive_int, default=50, metavar="N", help="Maximum snapshots retained by --history (default: 50)")
     parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
     parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
@@ -427,6 +429,8 @@ def _doctor(args: argparse.Namespace, trace: Path) -> int:
 def _scan(args: argparse.Namespace) -> int:
     try:
         fleet = scan_traces(args.scan, limit=args.scan_limit, suppress=args.suppress)
+        if args.history:
+            fleet["history"] = update_fleet_history(fleet, args.history, limit=args.history_limit)
         report = write_fleet_report(fleet, args.output)
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
@@ -439,6 +443,17 @@ def _scan(args: argparse.Namespace) -> int:
             f"Session fleet: {summary['runs']} run(s) · {summary['needs_attention']} need attention "
             f"· {summary['unresolved_incidents']} unresolved · {fleet['parse_errors']} unreadable"
         )
+        if fleet.get("history"):
+            trend = fleet["history"]["trend"]
+            if trend["has_baseline"]:
+                deltas = trend["deltas"]
+                print(
+                    f"Fleet trend: {trend['regressed_runs']} regressed · {trend['improved_runs']} improved "
+                    f"· {trend['new_runs']} new ({trend['new_runs_needing_attention']} need attention) "
+                    f"· {trend['left_scan_window']} left scan window · unresolved {deltas['unresolved_incidents']:+d}"
+                )
+            else:
+                print(f"Fleet trend: first snapshot recorded · {trend['new_runs']} run(s) · no previous baseline")
         for item in fleet["runs"][:10]:
             print(
                 f"- [{item['status'].upper()}] risk {item['risk_score']:>3} · {item['path']} "
@@ -452,6 +467,9 @@ def _scan(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.history and not args.scan:
+        print("backtrace-agent: --history requires --scan", file=sys.stderr)
+        return 2
     if args.verify_source and not args.verify_bundle:
         print("backtrace-agent: --verify-source requires --verify-bundle", file=sys.stderr)
         return 2

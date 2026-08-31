@@ -11,7 +11,7 @@ from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_po
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
-from backtrace_agent.fleet import discover_traces, render_fleet_html, scan_traces
+from backtrace_agent.fleet import discover_traces, render_fleet_html, scan_traces, update_fleet_history
 from backtrace_agent.report import render_html
 
 
@@ -324,6 +324,72 @@ def test_fleet_scan_ranks_runs_handles_errors_suppression_html_and_cli(tmp_path,
     assert json_report.exists()
     assert main(["--scan", str(root), str(root / "failed.jsonl"), "-o", str(tmp_path / "conflict.html")]) == 2
     capsys.readouterr()
+
+
+def test_fleet_history_is_private_bounded_atomic_and_reports_real_transitions(tmp_path, capsys):
+    root = tmp_path / "private-session-directory"
+    root.mkdir()
+    quiet = write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "confidential quiet objective"}}], "quiet-client.jsonl")
+    failed = write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "confidential failure"}}], "failed-client.jsonl")
+    history_path = tmp_path / "fleet-history.json"
+
+    first = scan_traces(root, limit=10)
+    first_history = update_fleet_history(first, history_path, limit=2)
+    assert first_history["snapshot_count"] == 1
+    assert first_history["trend"]["has_baseline"] is False
+    stored = history_path.read_text(encoding="utf-8")
+    assert "private-session-directory" not in stored
+    assert "quiet-client" not in stored
+    assert "failed-client" not in stored
+    assert "confidential" not in stored
+    parsed = json.loads(stored)
+    assert all(run["identity_sha256"].startswith("sha256:") for run in parsed["snapshots"][0]["runs"])
+    assert all(set(run) == {"identity_sha256", "status", "risk_score", "failures", "unresolved_incidents", "destructive_attempts", "repetitions", "stalls", "source_issues", "unsupported_items"} for run in parsed["snapshots"][0]["runs"])
+
+    quiet.unlink()
+    failed.write_text(json.dumps({"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "now clean"}}), encoding="utf-8")
+    write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "new failure"}}], "new-run.jsonl")
+    second = scan_traces(root, limit=10)
+    second_history = update_fleet_history(second, history_path, limit=2)
+    trend = second_history["trend"]
+    assert trend["has_baseline"] is True
+    assert trend["improved_runs"] == 1
+    assert trend["regressed_runs"] == 0
+    assert trend["new_runs"] == 1
+    assert trend["new_runs_needing_attention"] == 1
+    assert trend["left_scan_window"] == 1
+    assert trend["deltas"]["unresolved_incidents"] == 0
+    html = render_fleet_html({**second, "history": second_history})
+    assert "Is supervision improving?" in html
+    assert "LEFT WINDOW" in html
+    assert "not counted as recovered" in html
+    assert "Recent scan trends" in html
+
+    failed.write_text(json.dumps({"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "regressed"}}), encoding="utf-8")
+    third_history = update_fleet_history(scan_traces(root, limit=10), history_path, limit=2)
+    assert third_history["snapshot_count"] == 2
+    assert third_history["trend"]["regressed_runs"] == 1
+    assert len(json.loads(history_path.read_text())["snapshots"]) == 2
+
+    malformed = tmp_path / "malformed-history.json"
+    malformed.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="left unchanged"):
+        update_fleet_history(second, malformed)
+    assert malformed.read_text() == "{not-json"
+    malformed.write_text(json.dumps({"schema_version": 1, "snapshots": [{"recorded_at": "now", "summary": {}, "status_counts": {}, "runs": [{}]}]}))
+    semantic_damage = malformed.read_text()
+    with pytest.raises(ValueError, match="left unchanged"):
+        update_fleet_history(second, malformed)
+    assert malformed.read_text() == semantic_damage
+
+    cli_history = tmp_path / "cli-history.json"
+    cli_report = tmp_path / "cli-fleet.html"
+    assert main(["--scan", str(root), "--history", str(cli_history), "--history-limit", "3", "-o", str(cli_report)]) == 0
+    assert "Fleet trend: first snapshot recorded" in capsys.readouterr().out
+    assert main(["--scan", str(root), "--history", str(cli_history), "-o", str(cli_report)]) == 0
+    assert "Fleet trend:" in capsys.readouterr().out
+    assert main([str(failed), "--history", str(cli_history)]) == 2
+    assert "--history requires --scan" in capsys.readouterr().err
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):
