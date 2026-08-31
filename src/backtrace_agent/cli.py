@@ -10,7 +10,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
+from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
@@ -44,6 +44,13 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backtrace-agent", description="Turn raw AI-agent logs into evidence-backed diagnostics and restart context.")
     parser.add_argument("trace", type=Path, nargs="?", help="JSON/JSONL trace. Omit to use the newest local Codex session.")
@@ -66,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-events", type=nonnegative_int, metavar="N", help="Include N events before and after --incident evidence (default: 3)")
     parser.add_argument("--list-incidents", action="store_true", help="Print a compact incident catalog with stable --incident references, then exit")
     parser.add_argument("--incident-status", choices=("all", "recovered", "unresolved"), default="all", help="Filter --list-incidents by recovery status (default: all)")
+    parser.add_argument("--find", metavar="TEXT", help="Search normalized event evidence and print stable event IDs without writing a report")
+    parser.add_argument("--event-kind", action="append", default=[], metavar="KIND", help="With --find, include only this normalized event kind; repeatable")
+    parser.add_argument("--event-status", choices=("all", "ok", "error", "warning"), default="all", help="Filter --find by event status (default: all)")
+    parser.add_argument("--find-limit", type=positive_int, default=20, metavar="N", help="Maximum --find results to return (default: 20)")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -286,6 +297,42 @@ def _list_incidents(args: argparse.Namespace, trace: Path) -> int:
     return 0
 
 
+def _find_events(args: argparse.Namespace, trace: Path) -> int:
+    try:
+        run = parse_trace(trace)
+        if args.suppress:
+            run = suppress_content(run, args.suppress)
+        results = search_events(
+            run, args.find, agents=args.agent, kinds=args.event_kind,
+            status=args.event_status, limit=args.find_limit,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0
+    summary = results["summary"]
+    print(f"Matches: {summary['returned']} of {summary['total_matches']} · query: {results['query']!r}")
+    print(f"Source: {trace.resolve()}")
+    if not results["events"]:
+        print("No matching normalized events detected.")
+        return 0
+    for index, event in enumerate(results["events"], 1):
+        seconds = max(0, round(event["at_ms"] / 1000))
+        timestamp = f"{seconds // 60:02d}:{seconds % 60:02d}"
+        print(f"{index:>2}. [{event['status'].upper()}] {timestamp} · {event['agent']} · {event['kind']} · {event['title']}")
+        print(f"    Event: {event['id']}" + (f" · Operation: {event['operation']}" if event["operation"] else ""))
+        if event["files"]:
+            print(f"    Files: {', '.join(event['files'][:5])}")
+        if event["preview"]:
+            print(f"    Evidence: {event['preview']}")
+        print(f"    Slice: backtrace-agent {shlex.quote(str(trace))} --from-event {shlex.quote(event['id'])} --to-event {shlex.quote(event['id'])} -o focused-report.html")
+    if summary["truncated"]:
+        print(f"Showing the first {summary['returned']} ranked matches; increase --find-limit to return more.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify_source and not args.verify_bundle:
@@ -313,11 +360,20 @@ def main(argv: list[str] | None = None) -> int:
         print("backtrace-agent: --incident-status requires --list-incidents", file=sys.stderr)
         return 2
     if args.list_incidents:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.find or args.event_kind or args.event_status != "all"
         if conflicting:
             print("backtrace-agent: --list-incidents cannot be combined with watch, comparison, or focused-output options", file=sys.stderr)
             return 2
         return _list_incidents(args, trace)
+    if (args.event_kind or args.event_status != "all") and not args.find:
+        print("backtrace-agent: --event-kind and --event-status require --find", file=sys.stderr)
+        return 2
+    if args.find:
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents
+        if conflicting:
+            print("backtrace-agent: --find cannot be combined with watch, comparison, incident catalog, or focused-output options", file=sys.stderr)
+            return 2
+        return _find_events(args, trace)
     return _watch(args, trace) if args.watch else _process_once(args, trace)
 
 

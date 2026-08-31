@@ -114,6 +114,16 @@ backtrace-agent run.jsonl --list-incidents --agent builder --json > incidents.js
 
 The text catalog includes a complete focus command for every match. `--incident-status` accepts `all`, `recovered`, or `unresolved`; repeatable `--agent` filters by the agents present in failure and recovery evidence. Adding `--json` returns the same privacy-safe catalog as structured JSON for scripts and CI. Catalog mode exits without writing or refreshing HTML, bundles, summaries, or normalized trace files. The report's Incidents view also offers a command template for each incident; replace its `TRACE` placeholder with the source path.
 
+Search any normalized event evidence without building a report:
+
+```bash
+backtrace-agent run.jsonl --find "deploy_private_site_version"
+backtrace-agent run.jsonl --find "pytest" --event-status error --agent codex
+backtrace-agent run.jsonl --find "src/app.py" --event-kind file --find-limit 50 --json
+```
+
+Search is case-insensitive across stable event IDs, titles, operations, sanitized details, commands, output, agents, and files. Exact event-ID matches rank first, followed by titles, operations, and file paths, then broader evidence. `--event-kind`, `--event-status`, repeatable `--agent`, and `--find-limit` narrow results. Text results include a complete one-event slice command; `--json` returns the same ranked, privacy-safe records for automation. Search mode never writes or refreshes report artifacts. The HTML event inspector also offers a slice command template for its selected checkpoint.
+
 Enforce agent-run quality in CI:
 
 ```bash

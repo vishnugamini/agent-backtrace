@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, catalog_incidents, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, catalog_incidents, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
@@ -228,6 +228,48 @@ def test_incident_catalog_supports_text_json_and_filters_without_writing_report(
     assert "backtrace-agent TRACE --incident" in html
     assert "Copy command template" in html
     assert "Template copied" in html
+
+
+def test_ranked_event_search_supports_filters_json_limits_and_slice_templates(tmp_path, capsys):
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
+    results = search_events(run, "pytest")
+    assert results["summary"] == {"total_matches": 2, "returned": 2, "truncated": False}
+    assert [event["id"] for event in results["events"]] == ["e-2001000", "e-2003000"]
+    assert search_events(run, "pytest", status="error")["events"][0]["id"] == "e-2001000"
+    exact = search_events(run, "e-2003000")
+    assert exact["events"][0]["rank"] == 0
+    assert exact["events"][0]["id"] == "e-2003000"
+    file_results = search_events(run, "src/app.py", agents=["CODEX"], kinds=["file"])
+    assert [event["id"] for event in file_results["events"]] == ["e-2002000"]
+    limited = search_events(run, "test", limit=1)
+    assert limited["summary"]["returned"] == 1 and limited["summary"]["truncated"] is True
+    assert search_events(run, "not present")["events"] == []
+    assert search_events(run, "ghp_abcdefghijklmnopqrstuvwxyz123456")["events"] == []
+    with pytest.raises(ValueError, match="must not be empty"):
+        search_events(run, "   ")
+    with pytest.raises(ValueError, match="Unknown --agent"):
+        search_events(run, "test", agents=["reviewer"])
+    with pytest.raises(ValueError, match="Unknown --event-kind"):
+        search_events(run, "test", kinds=["network"])
+
+    assert main([str(trace), "--find", "pytest", "--event-status", "error"]) == 0
+    text_output = capsys.readouterr().out
+    assert "Matches: 1 of 1" in text_output
+    assert "--from-event e-2001000 --to-event e-2001000" in text_output
+
+    assert main([str(trace), "--find", "pytest", "--event-kind", "tool", "--json"]) == 0
+    json_output = json.loads(capsys.readouterr().out)
+    assert json_output["filters"]["kinds"] == ["tool"]
+    assert [event["id"] for event in json_output["events"]] == ["e-2003000"]
+    assert main([str(trace), "--event-kind", "tool"]) == 2
+    capsys.readouterr()
+    assert main([str(trace), "--find", "test", "--list-incidents"]) == 2
+    capsys.readouterr()
+
+    html = render_html(run)
+    assert 'id="copy-slice"' in html
+    assert "--from-event ${selected.id} --to-event ${selected.id}" in html
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):

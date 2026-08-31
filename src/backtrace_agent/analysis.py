@@ -444,6 +444,88 @@ def catalog_incidents(
     }
 
 
+def search_events(
+    run: Run,
+    query: str,
+    *,
+    agents: list[str] | None = None,
+    kinds: list[str] | None = None,
+    status: str = "all",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search sanitized normalized evidence and return stable event references."""
+    query = " ".join(query.split()).strip()
+    if not query:
+        raise ValueError("Search query must not be empty.")
+    if limit <= 0:
+        raise ValueError("Search limit must be greater than zero.")
+    if status not in {"all", "ok", "error", "warning"}:
+        raise ValueError("Event status must be all, ok, error, or warning.")
+
+    requested_agents = list(dict.fromkeys(agent.strip() for agent in (agents or []) if agent.strip()))
+    available_agents = {agent.casefold(): agent for agent in run.agents}
+    unknown_agents = [agent for agent in requested_agents if agent.casefold() not in available_agents]
+    if unknown_agents:
+        raise ValueError(
+            f"Unknown --agent value(s): {', '.join(unknown_agents)}. "
+            f"Available agents: {', '.join(run.agents)}"
+        )
+    selected_agent_keys = {agent.casefold() for agent in requested_agents}
+
+    available_kinds = {event.kind.casefold(): event.kind for event in run.events}
+    requested_kinds = list(dict.fromkeys(kind.strip() for kind in (kinds or []) if kind.strip()))
+    unknown_kinds = [kind for kind in requested_kinds if kind.casefold() not in available_kinds]
+    if unknown_kinds:
+        raise ValueError(
+            f"Unknown --event-kind value(s): {', '.join(unknown_kinds)}. "
+            f"Available kinds: {', '.join(sorted(available_kinds.values()))}"
+        )
+    selected_kind_keys = {kind.casefold() for kind in requested_kinds}
+
+    needle = query.casefold()
+    matches: list[tuple[int, Event]] = []
+    for event in run.events:
+        if selected_agent_keys and event.agent.casefold() not in selected_agent_keys:
+            continue
+        if selected_kind_keys and event.kind.casefold() not in selected_kind_keys:
+            continue
+        if status != "all" and event.status != status:
+            continue
+        primary = " ".join((event.title, event.operation or "", *event.files)).casefold()
+        secondary = " ".join((event.id, event.agent, event.detail, event.input, event.output)).casefold()
+        if needle not in primary and needle not in secondary:
+            continue
+        rank = 0 if event.id.casefold() == needle else 1 if needle in primary else 2
+        matches.append((rank, event))
+    matches.sort(key=lambda item: (item[0], item[1].at_ms, item[1].id))
+    selected = matches[:limit]
+    items = [{
+        "rank": rank,
+        "id": event.id,
+        "at_ms": event.at_ms,
+        "agent": event.agent,
+        "kind": event.kind,
+        "status": event.status,
+        "title": event.title,
+        "operation": event.operation,
+        "preview": _short(event.detail or event.output or event.input, 240),
+        "files": event.files,
+        "turn_id": event.turn_id,
+    } for rank, event in selected]
+    return {
+        "run": {"name": run.name, "session_id": run.session_id, "source": run.source},
+        "query": query,
+        "filters": {
+            "status": status,
+            "agents": [available_agents[agent.casefold()] for agent in requested_agents],
+            "kinds": [available_kinds[kind.casefold()] for kind in requested_kinds],
+            "limit": limit,
+        },
+        "summary": {"total_matches": len(matches), "returned": len(items), "truncated": len(matches) > len(items)},
+        "events": items,
+    }
+
+
 def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
     """Compare two runs using normalized metrics and explain every conclusion."""
     current_analysis = analyze_run(current)
