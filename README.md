@@ -103,6 +103,16 @@ backtrace-agent --scan ~/.codex/sessions \
 
 Fleet policy files accept only the five documented fleet keys, reject unknown keys, invalid types, negative thresholds, empty objects, and ineffective `false`-only configurations. Explicit numeric flags override matching file values; `--fail-on-fleet-regression` enables that check even when the file disables it. Trend rules still require `--history`. The policy filename appears in terminal output, HTML, `--json`, and JUnit so every decision points back to its reviewed rule set.
 
+Generate a directly navigable investigation pack while scanning:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --investigation-dir fleet-investigations \
+  -o session-fleet.html
+```
+
+The default `attention` scope generates a complete interactive report for each readable critical or attention run and links it from the selected-run panel. Use `--investigation-scope all` to include clean runs too. The dashboard also links a privacy-minimized `manifest.json` containing only status, risk, event counts, fingerprints, and opaque report filenames—never source paths, objectives, models, or raw events. Reports inherit every `--suppress` term. Files are written atomically, and the manifest is written last; reruns never delete unrelated or stale files from the destination directory. Backtrace policy files and investigation manifests are excluded from trace discovery so configuration cannot be mistaken for a run.
+
 Notify an external automation without putting its URL or secret in shell history:
 
 ```bash
@@ -406,7 +416,7 @@ Project layout:
 ```text
 src/backtrace_agent/   Python parser, diagnostics, single-run/fleet reports, and CLI
 tests_python/          Python behavior tests
-examples/              Sample trace
+examples/              Sample trace and reusable policies
 app/ + lib/            Interactive demo
 ```
 

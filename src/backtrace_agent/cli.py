@@ -14,7 +14,7 @@ from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_pol
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_fleet_junit_xml, render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
-from .fleet import evaluate_fleet_gate, scan_traces, update_fleet_history, write_fleet_report
+from .fleet import evaluate_fleet_gate, scan_traces, update_fleet_history, write_fleet_investigations, write_fleet_report
 from .notify import build_fleet_notification, deliver_webhook, format_fleet_notification, serialize_webhook_payload, validate_webhook_url
 from .report import write_report
 
@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-limit", type=positive_int, default=50, metavar="N", help="Maximum newest trace files to inspect with --scan (default: 50)")
     parser.add_argument("--history", type=Path, metavar="JSON", help="With --scan, append a privacy-minimized snapshot and show fleet trends")
     parser.add_argument("--history-limit", type=positive_int, default=50, metavar="N", help="Maximum snapshots retained by --history (default: 50)")
+    parser.add_argument("--investigation-dir", type=Path, metavar="DIR", help="With --scan, write linked full HTML reports for fleet investigation")
+    parser.add_argument("--investigation-scope", choices=("attention", "all"), help="Reports to generate: runs needing attention (default) or all readable runs")
     parser.add_argument("--fleet-policy", type=Path, metavar="JSON", help="With --scan, load reusable fleet-gate thresholds from a validated JSON policy")
     parser.add_argument("--max-fleet-needs-attention", type=nonnegative_int, metavar="N", help="With --scan, fail when more than N runs need attention")
     parser.add_argument("--max-fleet-unresolved", type=nonnegative_int, metavar="N", help="With --scan, fail when unresolved incidents exceed N")
@@ -473,7 +475,20 @@ def _doctor(args: argparse.Namespace, trace: Path) -> int:
 
 def _scan(args: argparse.Namespace) -> int:
     try:
-        fleet = scan_traces(args.scan, limit=args.scan_limit, suppress=args.suppress)
+        fleet = scan_traces(
+            args.scan,
+            limit=args.scan_limit,
+            suppress=args.suppress,
+            include_source_paths=bool(args.investigation_dir),
+        )
+        if args.investigation_dir:
+            write_fleet_investigations(
+                fleet,
+                args.investigation_dir,
+                dashboard_path=args.output,
+                scope=args.investigation_scope or "attention",
+                suppress=args.suppress,
+            )
         if args.history:
             fleet["history"] = update_fleet_history(fleet, args.history, limit=args.history_limit)
         fleet["quality_gate"] = evaluate_fleet_gate(fleet, args._fleet_gate_spec)
@@ -534,6 +549,12 @@ def _scan(args: argparse.Namespace) -> int:
             )
             if fleet["quality_gate"].get("policy_source"):
                 print(f"Fleet policy: {fleet['quality_gate']['policy_source']}")
+        if fleet.get("investigation"):
+            investigation = fleet["investigation"]
+            print(
+                f"Fleet investigations: {investigation['reports_written']} report(s) · "
+                f"{investigation['scope']} scope · manifest written"
+            )
         if fleet["notification"]["configured"]:
             notification = fleet["notification"]
             suffix = f" · HTTP {notification['status_code']}" if notification["status_code"] is not None else ""
@@ -556,6 +577,12 @@ def _scan(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.investigation_dir and not args.scan:
+        print("backtrace-agent: --investigation-dir requires --scan", file=sys.stderr)
+        return 2
+    if args.investigation_scope and not args.investigation_dir:
+        print("backtrace-agent: --investigation-scope requires --investigation-dir", file=sys.stderr)
+        return 2
     if args.fleet_policy and not args.scan:
         print("backtrace-agent: --fleet-policy requires --scan", file=sys.stderr)
         return 2

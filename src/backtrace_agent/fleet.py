@@ -12,11 +12,17 @@ from typing import Any, Iterable
 
 from .analysis import analyze_run
 from .core import parse_trace, suppress_content
+from .report import write_report
 
 
 TRACE_SUFFIXES = {".jsonl", ".json"}
 IGNORED_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__"}
 IGNORED_JSON_FILES = {"package.json", "package-lock.json", "tsconfig.json", "hosting.json"}
+
+
+def _is_ignored_json(filename: str) -> bool:
+    folded = filename.casefold()
+    return folded in IGNORED_JSON_FILES or folded == "policy.json" or folded.endswith("-policy.json") or folded == "manifest.json"
 
 
 def discover_traces(root: str | Path, *, limit: int = 50) -> list[Path]:
@@ -31,7 +37,7 @@ def discover_traces(root: str | Path, *, limit: int = 50) -> list[Path]:
         subdirectories[:] = [name for name in subdirectories if name not in IGNORED_DIRECTORIES]
         for filename in filenames:
             path = Path(directory) / filename
-            if path.suffix.casefold() not in TRACE_SUFFIXES or filename in IGNORED_JSON_FILES:
+            if path.suffix.casefold() not in TRACE_SUFFIXES or _is_ignored_json(filename):
                 continue
             try:
                 candidates.append((path.stat().st_mtime_ns, path))
@@ -51,7 +57,13 @@ def _display_value(value: str, terms: Iterable[str]) -> str:
     return "[suppressed]" if any(term.casefold() in folded for term in terms if term) else value
 
 
-def scan_traces(root: str | Path, *, limit: int = 50, suppress: Iterable[str] = ()) -> dict[str, Any]:
+def scan_traces(
+    root: str | Path,
+    *,
+    limit: int = 50,
+    suppress: Iterable[str] = (),
+    include_source_paths: bool = False,
+) -> dict[str, Any]:
     """Parse recent traces and return privacy-safe, risk-ranked run summaries."""
     root = Path(root).expanduser().resolve()
     suppression_terms = list(dict.fromkeys(term.strip() for term in suppress if term.strip()))
@@ -126,6 +138,8 @@ def scan_traces(root: str | Path, *, limit: int = 50, suppress: Iterable[str] = 
                 "report_command": report_command,
                 "error": None,
             })
+            if include_source_paths:
+                runs[-1]["_source_path"] = str(path)
         except (OSError, ValueError) as exc:
             parse_errors += 1
             runs.append({
@@ -154,6 +168,8 @@ def scan_traces(root: str | Path, *, limit: int = 50, suppress: Iterable[str] = 
                 "report_command": report_command.replace(" -o run-report.html", " --doctor"),
                 "error": _display_value(_short(str(exc), 240), suppression_terms),
             })
+            if include_source_paths:
+                runs[-1]["_source_path"] = str(path)
     runs.sort(key=lambda item: (-item["risk_score"], item["modified_at"], item["path"]), reverse=False)
     for index, item in enumerate(runs, 1):
         item["id"] = f"fleet-run-{index:04d}"
@@ -175,6 +191,76 @@ def scan_traces(root: str | Path, *, limit: int = 50, suppress: Iterable[str] = 
         },
         "runs": runs,
     }
+
+
+def write_fleet_investigations(
+    fleet: dict[str, Any],
+    destination: str | Path,
+    *,
+    dashboard_path: str | Path,
+    scope: str = "attention",
+    suppress: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Write linked full reports without exposing private source paths in fleet output."""
+    if scope not in {"attention", "all"}:
+        raise ValueError("Investigation scope must be attention or all.")
+    destination = Path(destination).expanduser().resolve()
+    dashboard_path = Path(dashboard_path).expanduser().resolve()
+    if destination.exists() and not destination.is_dir():
+        raise ValueError(f"--investigation-dir expects a directory, not a file: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    suppression_terms = list(dict.fromkeys(term.strip() for term in suppress if term.strip()))
+    manifest_runs: list[dict[str, Any]] = []
+    eligible = 0
+    for item in fleet["runs"]:
+        source_path = item.pop("_source_path", None)
+        item["investigation_report"] = None
+        selected = scope == "all" or item["status"] != "clean"
+        if not selected or item.get("error") or not source_path:
+            continue
+        eligible += 1
+        run = parse_trace(source_path)
+        if suppression_terms:
+            run = suppress_content(run, suppression_terms)
+        identity = hashlib.sha256(f"source:{source_path}".encode("utf-8")).hexdigest()[:16]
+        filename = f"run-{identity}.html"
+        report_path = destination / filename
+        write_report(run, report_path)
+        link = os.path.relpath(report_path, dashboard_path.parent).replace(os.sep, "/")
+        item["investigation_report"] = link
+        manifest_runs.append({
+            "id": item["id"],
+            "status": item["status"],
+            "risk_score": item["risk_score"],
+            "events": item["events"],
+            "source_fingerprint": item.get("source_fingerprint"),
+            "report": filename,
+        })
+    for item in fleet["runs"]:
+        item.pop("_source_path", None)
+    manifest = {
+        "schema_version": 1,
+        "generated_at": fleet["generated_at"],
+        "scope": scope,
+        "reports": manifest_runs,
+    }
+    manifest_path = destination / "manifest.json"
+    descriptor, temporary = tempfile.mkstemp(prefix=".manifest.", dir=destination)
+    os.close(descriptor)
+    try:
+        Path(temporary).write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, manifest_path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    result = {
+        "configured": True,
+        "scope": scope,
+        "eligible_runs": eligible,
+        "reports_written": len(manifest_runs),
+        "manifest": os.path.relpath(manifest_path, dashboard_path.parent).replace(os.sep, "/"),
+    }
+    fleet["investigation"] = result
+    return result
 
 
 HISTORY_SCHEMA_VERSION = 1
@@ -377,14 +463,24 @@ def render_fleet_html(fleet: dict[str, Any]) -> str:
 const F=JSON.parse(document.getElementById('fleet-data').textContent),$=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let selected=null,baselineId=null;$('#root').textContent=`Scanned ${F.root} · ${F.files_discovered} newest trace file(s)`;const cards=[['RUNS',F.summary.runs],['NEED ATTENTION',F.summary.needs_attention],['FAILED ACTIONS',F.summary.failures],['UNRESOLVED',F.summary.unresolved_incidents],['SOURCE ISSUES',F.summary.source_issues],['UNSUPPORTED',F.summary.unsupported_items]];$('#metrics').innerHTML=cards.map(([l,v])=>`<div class="metric"><strong>${v}</strong><span>${l}</span></div>`).join('');if(F.history){const H=F.history,T=H.trend,signed=n=>`${n>0?'+':''}${n}`;$('#trend').hidden=false;$('#snapshot-count').textContent=`${H.snapshot_count} snapshot${H.snapshot_count===1?'':'s'}`;$('#trend-summary').textContent=T.has_baseline?`Compared with ${new Date(T.previous_recorded_at).toLocaleString()}. Status changes require the same hashed run identity in both scans.`:'First snapshot recorded. Run this command again later to establish a previous-scan baseline.';const tc=[['REGRESSED',T.regressed_runs,'bad'],['IMPROVED',T.improved_runs,'good'],['NEW RUNS',T.new_runs,''],['LEFT WINDOW',T.left_scan_window,''],['ATTENTION Δ',signed(T.deltas.needs_attention),T.deltas.needs_attention>0?'bad':T.deltas.needs_attention<0?'good':''],['UNRESOLVED Δ',signed(T.deltas.unresolved_incidents),T.deltas.unresolved_incidents>0?'bad':T.deltas.unresolved_incidents<0?'good':'']];$('#trend-cards').innerHTML=tc.map(([l,v,c])=>`<div class="trend-card ${c}"><strong>${v}</strong><span>${l}</span></div>`).join('');const snapshots=H.recent_snapshots,max=Math.max(1,...snapshots.flatMap(s=>[s.summary.needs_attention,s.summary.unresolved_incidents]));$('#trend-chart').innerHTML=snapshots.map(s=>`<div class="scan-column" title="${esc(new Date(s.recorded_at).toLocaleString())}: ${s.summary.needs_attention} need attention, ${s.summary.unresolved_incidents} unresolved"><i style="height:${s.summary.needs_attention/max*100}%"></i><i class="unresolved" style="height:${s.summary.unresolved_incidents/max*100}%"></i><time>${esc(new Date(s.recorded_at).toLocaleDateString())}</time></div>`).join('')}function updateBaseline(){const b=F.runs.find(x=>x.id===baselineId);$('#baseline-note').textContent=b?`Comparison baseline: ${b.name} · ${b.path}`:'No comparison baseline selected.'}
 const time=v=>new Date(v).toLocaleString(),duration=ms=>ms>=60000?`${(ms/60000).toFixed(1)}m`:`${(ms/1000).toFixed(1)}s`;function filtered(){const q=$('#search').value.toLowerCase(),status=$('#status').value,sort=$('#sort').value;const rows=F.runs.filter(r=>(status==='all'||r.status===status)&&(!q||[r.path,r.name,r.objective,r.model,r.session_id].join(' ').toLowerCase().includes(q)));rows.sort((a,b)=>sort==='newest'?b.modified_at.localeCompare(a.modified_at):sort==='failures'?b.failures-a.failures:sort==='unresolved'?b.unresolved_incidents-a.unresolved_incidents:b.risk_score-a.risk_score||b.modified_at.localeCompare(a.modified_at));return rows}function render(){const runs=filtered();$('#rows').innerHTML=runs.length?runs.map(r=>`<tr data-run="${r.id}" class="${selected===r.id?'selected':''}"><td><span class="status ${r.status}">${r.status}</span></td><td><span class="risk">${r.risk_score}</span></td><td><strong>${esc(r.name)}</strong><div class="path">${esc(r.path)}</div><small>${esc(r.model||'model unknown')}</small></td><td class="objective">${esc(r.objective)}</td><td>${r.actions}</td><td>${r.failures}</td><td>${r.unresolved_incidents}</td><td>${r.source_issues} issues<br>${r.unsupported_items} unsupported</td><td>${time(r.modified_at)}</td></tr>`).join(''):'<tr><td colspan="9" class="empty">No runs match these filters.</td></tr>';document.querySelectorAll('tbody tr[data-run]').forEach(row=>row.onclick=()=>open(row.dataset.run))}function open(id){selected=id;const r=F.runs.find(x=>x.id===id);if(!r)return;const baseline=F.runs.find(x=>x.id===baselineId),canCompare=baseline&&baseline.id!==r.id&&baseline.source_argument&&r.source_argument;$('#detail').classList.add('open');$('#detail').innerHTML=`<div class="kicker">SELECTED RUN</div><div class="detail-grid"><div><h2>${esc(r.name)}</h2><p>${esc(r.objective)}</p><div class="facts"><span class="pill">${r.events} events</span><span class="pill">${r.actions} actions</span><span class="pill">${duration(r.duration_ms)}</span><span class="pill">${r.repetitions} repetitions</span><span class="pill">${r.stalls} stalls</span><span class="pill">${r.ordering_notes} ordering notes</span></div><div class="compare-actions"><button class="button secondary" id="set-baseline" ${r.source_argument?'':'disabled'}>${baselineId===r.id?'Baseline selected':'Set as baseline'}</button><button class="button secondary" id="copy-compare" ${canCompare?'':'disabled'}>Copy comparison command</button></div></div><div><p><strong>Session</strong><br><code>${esc(r.session_id||'unknown')}</code></p><p><strong>Source fingerprint</strong><br><code>${esc(r.source_fingerprint||'unavailable')}</code></p>${r.error?`<p><strong>Parse error</strong><br>${esc(r.error)}</p>`:''}</div></div><div class="command"><code>${esc(r.report_command)}</code><button class="button" id="copy">Copy command</button></div>`;$('#copy').onclick=async()=>{await navigator.clipboard.writeText(r.report_command);$('#copy').textContent='Copied'};$('#set-baseline').onclick=()=>{if(!r.source_argument)return;baselineId=r.id;updateBaseline();open(r.id)};$('#copy-compare').onclick=async()=>{if(!canCompare)return;const command=`backtrace-agent ${r.source_argument} --compare ${baseline.source_argument} -o comparison.html`;await navigator.clipboard.writeText(command);$('#copy-compare').textContent='Comparison copied'};render();$('#detail').scrollIntoView({behavior:'smooth',block:'nearest'})}['search','status','sort'].forEach(id=>$('#'+id).addEventListener(id==='search'?'input':'change',render));updateBaseline();render();
 </script></body></html>'''.replace("__DATA__", payload)
-    gate_css = '.fleet-gate{margin:0 0 28px;padding:20px;border:1px solid #9ab8a7;border-left:6px solid var(--green);background:#eef5ef}.fleet-gate.fail{border-color:#d39b8f;border-left-color:var(--red);background:#fbefec}.gate-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.gate-head h2{font:27px Georgia,serif;margin:4px 0}.gate-result{font:800 12px monospace;border:1px solid currentColor;border-radius:999px;padding:7px 10px;color:var(--green)}.fleet-gate.fail .gate-result{color:var(--red)}.gate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}.gate-check{padding:12px;background:var(--surface);border:1px solid var(--line)}.gate-check.fail{border-color:#d39b8f}.gate-check.skip{border-style:dashed}.gate-check strong,.gate-check span,.gate-check small{display:block}.gate-check span{font:9px monospace;color:var(--muted);margin-top:5px}.gate-check small{margin-top:5px;color:#52605a}.delivery{margin:14px 0 0;padding:9px 11px;background:#fffdf799;border-left:3px solid var(--blue);font:11px monospace}.delivery.failed{border-left-color:var(--red)}.delivery.skipped{border-left-color:var(--amber)}'
-    gate_html = '<section class="fleet-gate" id="fleet-gate" hidden><div class="gate-head"><div><div class="kicker">AUTOMATION DECISION</div><h2 id="gate-title"></h2><p id="gate-summary"></p></div><span class="gate-result" id="gate-result"></span></div><div class="gate-grid" id="gate-checks"></div><p class="delivery" id="notification-status" hidden></p></section>'
-    gate_js = '''const G=F.quality_gate,N=F.notification;if(G?.configured){const gate=$('#fleet-gate');gate.hidden=false;gate.classList.toggle('fail',!G.passed);$('#gate-title').textContent=G.passed?'Fleet gate passed':'Fleet gate failed';$('#gate-result').textContent=G.passed?'PASS':'FAIL';const provenance=G.policy_source?` Policy ${G.policy_source}.`:'';$('#gate-summary').textContent=`${G.summary.passed} passed · ${G.summary.failed} failed · ${G.summary.skipped} skipped.${provenance} Failed configured checks return exit code 1.`;$('#gate-checks').innerHTML=G.checks.map(c=>`<article class="gate-check ${c.skipped?'skip':c.passed?'':'fail'}"><strong>${esc(c.label)}</strong><span>Actual ${esc(c.actual)} · expected ${esc(c.expected)}</span><small>${esc(c.detail)}</small></article>`).join('');if(N?.configured){const delivery=$('#notification-status'),written=N.payload_written?' · exact payload written':'';delivery.hidden=false;delivery.classList.add(N.status);delivery.textContent=N.status==='delivered'?`${N.format} webhook delivered in ${N.attempts} attempt(s) · HTTP ${N.status_code} · ${N.event_id}${written}`:N.status==='skipped'?`${N.format} webhook skipped · ${N.error}${written}`:N.status==='previewed'?`${N.format} webhook previewed without a network request · ${N.event_id}${written}`:`${N.format} webhook delivery failed after ${N.attempts} attempt(s) · ${N.error}${written}`}}'''
+    gate_css = '.fleet-gate{margin:0 0 28px;padding:20px;border:1px solid #9ab8a7;border-left:6px solid var(--green);background:#eef5ef}.fleet-gate.fail{border-color:#d39b8f;border-left-color:var(--red);background:#fbefec}.gate-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.gate-head h2{font:27px Georgia,serif;margin:4px 0}.gate-result{font:800 12px monospace;border:1px solid currentColor;border-radius:999px;padding:7px 10px;color:var(--green)}.fleet-gate.fail .gate-result{color:var(--red)}.gate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}.gate-check{padding:12px;background:var(--surface);border:1px solid var(--line)}.gate-check.fail{border-color:#d39b8f}.gate-check.skip{border-style:dashed}.gate-check strong,.gate-check span,.gate-check small{display:block}.gate-check span{font:9px monospace;color:var(--muted);margin-top:5px}.gate-check small{margin-top:5px;color:#52605a}.delivery{margin:14px 0 0;padding:9px 11px;background:#fffdf799;border-left:3px solid var(--blue);font:11px monospace}.delivery.failed{border-left-color:var(--red)}.delivery.skipped{border-left-color:var(--amber)}.investigation-pack{margin:0 0 28px;padding:20px;border:1px solid #9cb6c9;border-left:6px solid var(--blue);background:#eef4f8;display:flex;align-items:center;justify-content:space-between;gap:20px}.investigation-pack[hidden]{display:none}.investigation-pack h2{font:27px Georgia,serif;margin:4px 0}.investigation-pack p{margin:4px 0;color:#52616b}.investigation-pack .button{text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center}'
+    gate_html = '<section class="fleet-gate" id="fleet-gate" hidden><div class="gate-head"><div><div class="kicker">AUTOMATION DECISION</div><h2 id="gate-title"></h2><p id="gate-summary"></p></div><span class="gate-result" id="gate-result"></span></div><div class="gate-grid" id="gate-checks"></div><p class="delivery" id="notification-status" hidden></p></section><section class="investigation-pack" id="investigation-pack" hidden><div><div class="kicker">LINKED INVESTIGATION PACK</div><h2>Open the run, not another command</h2><p id="investigation-summary"></p></div><a class="button secondary" id="manifest-link" target="_blank" rel="noopener">Open manifest</a></section>'
+    gate_js = '''const G=F.quality_gate,N=F.notification;if(G?.configured){const gate=$('#fleet-gate');gate.hidden=false;gate.classList.toggle('fail',!G.passed);$('#gate-title').textContent=G.passed?'Fleet gate passed':'Fleet gate failed';$('#gate-result').textContent=G.passed?'PASS':'FAIL';const provenance=G.policy_source?` Policy ${G.policy_source}.`:'';$('#gate-summary').textContent=`${G.summary.passed} passed · ${G.summary.failed} failed · ${G.summary.skipped} skipped.${provenance} Failed configured checks return exit code 1.`;$('#gate-checks').innerHTML=G.checks.map(c=>`<article class="gate-check ${c.skipped?'skip':c.passed?'':'fail'}"><strong>${esc(c.label)}</strong><span>Actual ${esc(c.actual)} · expected ${esc(c.expected)}</span><small>${esc(c.detail)}</small></article>`).join('');if(N?.configured){const delivery=$('#notification-status'),written=N.payload_written?' · exact payload written':'';delivery.hidden=false;delivery.classList.add(N.status);delivery.textContent=N.status==='delivered'?`${N.format} webhook delivered in ${N.attempts} attempt(s) · HTTP ${N.status_code} · ${N.event_id}${written}`:N.status==='skipped'?`${N.format} webhook skipped · ${N.error}${written}`:N.status==='previewed'?`${N.format} webhook previewed without a network request · ${N.event_id}${written}`:`${N.format} webhook delivery failed after ${N.attempts} attempt(s) · ${N.error}${written}`}}if(F.investigation?.configured){$('#investigation-pack').hidden=false;$('#investigation-summary').textContent=`${F.investigation.reports_written} full report(s) generated for ${F.investigation.scope==='all'?'all readable runs':'runs needing attention'}. Select a linked run below or inspect the privacy-minimized manifest.`;$('#manifest-link').href=F.investigation.manifest;}'''
     template = template.replace('.trend{', gate_css + '.trend{', 1)
     template = template.replace('<section class="trend" id="trend" hidden>', gate_html + '<section class="trend" id="trend" hidden>', 1)
     template = template.replace("if(F.history){", gate_js + "if(F.history){", 1)
+    template = template.replace(
+        '<div class="compare-actions"><button class="button secondary" id="set-baseline"',
+        '<div class="compare-actions">${r.investigation_report?`<a class="button" href="${esc(r.investigation_report)}" target="_blank" rel="noopener">Open investigation</a>`:\'\'}<button class="button secondary" id="set-baseline"',
+        1,
+    )
+    template = template.replace(
+        "<small>${esc(r.model||'model unknown')}</small>",
+        "<small>${esc(r.model||'model unknown')}${r.investigation_report?' · report ready':''}</small>",
+        1,
+    )
     template = template.replace('@media(max-width:850px){.metrics,.trend-cards', '@media(max-width:850px){.gate-grid{grid-template-columns:1fr 1fr}.metrics,.trend-cards', 1)
-    template = template.replace('@media(max-width:520px){.shell', '@media(max-width:520px){.gate-head{display:block}.gate-result{display:inline-block;margin-top:8px}.gate-grid{grid-template-columns:1fr}.shell', 1)
+    template = template.replace('@media(max-width:520px){.shell', '@media(max-width:520px){.gate-head{display:block}.gate-result{display:inline-block;margin-top:8px}.gate-grid{grid-template-columns:1fr}.investigation-pack{display:block}.investigation-pack .button{margin-top:10px}.shell', 1)
     return template
 
 

@@ -286,6 +286,8 @@ def test_fleet_scan_ranks_runs_handles_errors_suppression_html_and_cli(tmp_path,
     write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "deployment failed"}}], "failed.jsonl")
     (root / "broken.jsonl").write_text('{"unfinished":', encoding="utf-8")
     (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "team-policy.json").write_text('{"max_failures": 0}', encoding="utf-8")
+    (root / "manifest.json").write_text('{"schema_version": 1}', encoding="utf-8")
     ignored = root / "node_modules"
     ignored.mkdir()
     write_jsonl(ignored, [{"type": "error", "payload": {"message": "ignore me"}}], "ignored.jsonl")
@@ -513,6 +515,75 @@ def test_fleet_policy_is_strict_overridable_and_preserves_provenance(tmp_path, c
     trend_only.write_text(json.dumps({"max_new_attention": 0}))
     assert main(["--scan", str(root), "--fleet-policy", str(trend_only), "-o", str(report)]) == 2
     assert "trend gate options require --history" in capsys.readouterr().err
+
+
+def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path, capsys):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    write_jsonl(root, [
+        {"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "healthy run"}},
+    ], "clean.jsonl")
+    write_jsonl(root, [
+        {"timestamp": "2026-08-29T12:00:01Z", "type": "error", "payload": {"message": "private needle failure"}},
+    ], "failed.jsonl")
+    assert all("_source_path" not in item for item in scan_traces(root)["runs"])
+
+    dashboard = tmp_path / "fleet.html"
+    details = tmp_path / "investigations"
+    assert main([
+        "--scan", str(root), "--investigation-dir", str(details),
+        "--suppress", "needle", "--json", "-o", str(dashboard),
+    ]) == 0
+    fleet = json.loads(capsys.readouterr().out)
+    assert fleet["investigation"] == {
+        "configured": True,
+        "scope": "attention",
+        "eligible_runs": 1,
+        "reports_written": 1,
+        "manifest": "investigations/manifest.json",
+    }
+    assert "_source_path" not in json.dumps(fleet)
+    linked = [item for item in fleet["runs"] if item["investigation_report"]]
+    assert len(linked) == 1 and linked[0]["status"] == "critical"
+    linked_report = (dashboard.parent / linked[0]["investigation_report"]).resolve()
+    assert linked_report.exists()
+    assert "private needle" not in linked_report.read_text()
+    dashboard_text = dashboard.read_text()
+    assert "LINKED INVESTIGATION PACK" in dashboard_text
+    assert "Open investigation" in dashboard_text
+    assert ".investigation-pack[hidden]{display:none}" in dashboard_text
+    assert "report ready" in dashboard_text
+    assert '"reports_written": 1' in dashboard_text
+
+    manifest = json.loads((details / "manifest.json").read_text())
+    assert manifest["scope"] == "attention" and len(manifest["reports"]) == 1
+    minimized = json.dumps(manifest)
+    assert str(root) not in minimized
+    assert "clean.jsonl" not in minimized and "failed.jsonl" not in minimized
+    assert "healthy run" not in minimized and "private needle" not in minimized
+    assert set(manifest["reports"][0]) == {"id", "status", "risk_score", "events", "source_fingerprint", "report"}
+
+    all_dashboard = tmp_path / "all-fleet.html"
+    all_details = tmp_path / "all-investigations"
+    assert main([
+        "--scan", str(root), "--investigation-dir", str(all_details),
+        "--investigation-scope", "all", "-o", str(all_dashboard),
+    ]) == 0
+    assert "Fleet investigations: 2 report(s) · all scope · manifest written" in capsys.readouterr().out
+    assert len(json.loads((all_details / "manifest.json").read_text())["reports"]) == 2
+
+    invalid_destination = tmp_path / "not-a-directory"
+    invalid_destination.write_text("occupied")
+    missing_dashboard = tmp_path / "missing.html"
+    assert main([
+        "--scan", str(root), "--investigation-dir", str(invalid_destination), "-o", str(missing_dashboard),
+    ]) == 2
+    assert "expects a directory" in capsys.readouterr().err
+    assert not missing_dashboard.exists()
+    assert main([str(root / "clean.jsonl"), "--investigation-dir", str(details)]) == 2
+    assert "--investigation-dir requires --scan" in capsys.readouterr().err
+    assert main(["--scan", str(root), "--investigation-scope", "all"]) == 2
+    assert "--investigation-scope requires --investigation-dir" in capsys.readouterr().err
 
 
 def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys, monkeypatch):
