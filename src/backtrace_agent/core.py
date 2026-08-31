@@ -505,6 +505,7 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
 
     first_ms = min(task_starts.values(), default=int(_parse_time(meta.get("timestamp")) or 0))
     events: list[Event] = []
+    normalized_item_types: Counter[str] = Counter()
     for record in records:
         if record.get("type") != "event_msg":
             continue
@@ -594,6 +595,7 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
 
         if event:
             events.append(event)
+            normalized_item_types[item_type] += 1
 
     events.sort(key=lambda event: (event.at_ms, event.id))
     turns = sorted(turns_by_id.values(), key=lambda turn: turn.started_at_ms)
@@ -613,6 +615,11 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
     unsupported_types = completed_item_types.keys() - SUPPORTED_CODEX_ITEM_TYPES
     unsupported = Counter({item_type: completed_item_types[item_type] for item_type in unsupported_types})
     supported_candidates = semantic_candidates - sum(unsupported.values())
+    omitted_supported = Counter({
+        item_type: completed_item_types[item_type] - normalized_item_types[item_type]
+        for item_type in SUPPORTED_CODEX_ITEM_TYPES
+        if completed_item_types[item_type] > normalized_item_types[item_type]
+    })
     ingestion = {
         "adapter": "codex",
         "total_records": len(records),
@@ -620,9 +627,21 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
         "semantic_candidates": semantic_candidates,
         "normalized_events": len(events),
         "semantic_coverage_percent": round(len(events) / semantic_candidates * 100, 1) if semantic_candidates else 100.0,
+        "adapter_coverage_percent": round(supported_candidates / semantic_candidates * 100, 1) if semantic_candidates else 100.0,
         "unsupported_completed_items": sum(unsupported.values()),
         "unsupported_item_types": [{"type": item_type, "count": count} for item_type, count in sorted(unsupported.items())],
         "omitted_supported_items": max(0, supported_candidates - len(events)),
+        "omitted_supported_item_types": [{"type": item_type, "count": count} for item_type, count in sorted(omitted_supported.items())],
+        "item_type_coverage": [
+            {
+                "type": item_type,
+                "completed": count,
+                "normalized": normalized_item_types[item_type],
+                "omitted": max(0, count - normalized_item_types[item_type]),
+                "supported": item_type in SUPPORTED_CODEX_ITEM_TYPES,
+            }
+            for item_type, count in sorted(completed_item_types.items())
+        ],
     }
     return Run(
         name=name, source="Codex session", events=events, session_id=str(meta.get("session_id") or meta.get("id") or "") or None,
@@ -669,9 +688,12 @@ def _parse_generic(records: list[dict[str, Any]], name: str, raw: str) -> Run:
         "semantic_candidates": len(records),
         "normalized_events": len(events),
         "semantic_coverage_percent": 100.0,
+        "adapter_coverage_percent": 100.0,
         "unsupported_completed_items": 0,
         "unsupported_item_types": [],
         "omitted_supported_items": 0,
+        "omitted_supported_item_types": [],
+        "item_type_coverage": [{"type": "generic", "completed": len(records), "normalized": len(events), "omitted": 0, "supported": True}],
     }
     return Run(name, "Generic trace", events, privacy_findings=scan_secrets(raw), metadata={"record_count": len(records), "adapter": "generic", "ignored_record_count": 0, "ingestion": ingestion})
 

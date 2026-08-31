@@ -132,7 +132,7 @@ backtrace-agent run.jsonl --audit-ingestion
 backtrace-agent run.jsonl --audit-ingestion --json > ingestion-audit.json
 ```
 
-The audit separates transport and bookkeeping records from completed semantic candidates, reports how many candidates became normalized events, identifies supported items omitted because their content was empty, and names unknown completed-item types with counts. Audit mode is source-wide and exits without writing report artifacts. This distinction matters: a low normalized-to-raw-record ratio is normal for verbose agent transports, while an unsupported semantic type may mean the parser needs an update.
+The audit separates transport and bookkeeping records from completed semantic candidates, reports adapter coverage independently from event materialization, identifies supported items omitted because their content was empty, and names unknown completed-item types with counts. The HTML report adds a per-provider-type matrix showing completed, normalized, and omitted counts. Audit mode is source-wide and exits without writing report artifacts. This distinction matters: a low normalized-to-raw-record ratio is normal for verbose agent transports, while an unsupported semantic type may mean the parser needs an update.
 
 Enforce agent-run quality in CI:
 

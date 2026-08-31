@@ -358,7 +358,7 @@ def _audit_ingestion(args: argparse.Namespace, trace: Path) -> int:
     print(f"Raw records: {ingestion['total_records']} · bookkeeping separated: {ingestion['bookkeeping_records']}")
     print(
         f"Semantic candidates: {ingestion['semantic_candidates']} · normalized: {ingestion['normalized_events']} "
-        f"· coverage: {ingestion['semantic_coverage_percent']}%"
+        f"· materialized: {ingestion['semantic_coverage_percent']}% · adapter coverage: {ingestion['adapter_coverage_percent']}%"
     )
     print(
         f"Unsupported completed items: {ingestion['unsupported_completed_items']} "
@@ -370,6 +370,10 @@ def _audit_ingestion(args: argparse.Namespace, trace: Path) -> int:
             print(f"- {item['type']}: {item['count']}")
     else:
         print("Unsupported provider item types: none detected")
+    if ingestion["omitted_supported_item_types"]:
+        print("Supported item types omitted for empty content:")
+        for item in ingestion["omitted_supported_item_types"]:
+            print(f"- {item['type']}: {item['count']}")
     return 0
 
 

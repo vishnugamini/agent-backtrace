@@ -114,7 +114,7 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         ("Bookkeeping separated", ingestion["bookkeeping_records"]),
         ("Semantic candidates", ingestion["semantic_candidates"]),
         ("Normalized events", ingestion["normalized_events"]),
-        ("Semantic coverage", f'{ingestion["semantic_coverage_percent"]}%'),
+        ("Adapter coverage", f'{ingestion["adapter_coverage_percent"]}%'),
         ("Unsupported items", unsupported_count),
     ]
     ingestion_card_html = "".join(
@@ -125,12 +125,18 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         f'<tr><td><code>{html.escape(item["type"])}</code></td><td>{item["count"]}</td><td>Provider item completed, but no semantic event adapter exists yet.</td></tr>'
         for item in ingestion["unsupported_item_types"]
     ) or '<tr><td colspan="3" class="empty">No unsupported completed-item types detected.</td></tr>'
+    coverage_rows = "".join(
+        f'<tr><td><code>{html.escape(item["type"])}</code></td><td>{"supported" if item["supported"] else "unsupported"}</td><td>{item["completed"]}</td><td>{item["normalized"]}</td><td>{item["omitted"]}</td></tr>'
+        for item in ingestion["item_type_coverage"]
+    ) or '<tr><td colspan="5" class="empty">No completed semantic item types were recorded.</td></tr>'
     scope_note = "This audit describes the complete source trace, including events outside the focused slice." if scope.get("active") else "This audit describes the complete source trace."
     ingestion_view = (
         '<section class="view" id="ingestion"><section class="panel"><div class="kicker">SOURCE-WIDE PARSER COVERAGE</div>'
         '<h2>Did every meaningful provider item make it into the report?</h2>'
         f'<p class="objective">{html.escape(scope_note)} Transport messages, token counters, turn boundaries, and other bookkeeping are separated intentionally; they are not missing agent actions.</p>'
         f'<div class="comparison-grid">{ingestion_card_html}</div></section>'
+        '<section class="panel" style="margin-top:18px"><div class="kicker">PROVIDER TYPE MATRIX</div><h2>What was materialized, type by type?</h2>'
+        f'<table><thead><tr><th>Provider type</th><th>Adapter</th><th>Completed</th><th>Normalized</th><th>Empty or unsupported</th></tr></thead><tbody>{coverage_rows}</tbody></table></section>'
         '<section class="panel" style="margin-top:18px"><div class="kicker">SCHEMA DRIFT</div>'
         f'<h2>{"Parser update may be needed" if unsupported_count else "No unsupported provider types detected"}</h2>'
         f'<p>Supported items omitted because their semantic content was empty: <strong>{ingestion["omitted_supported_items"]}</strong>. These are tracked separately from unknown provider types.</p>'

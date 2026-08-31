@@ -87,9 +87,12 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "semantic_candidates": len(run.events),
         "normalized_events": len(run.events),
         "semantic_coverage_percent": 100.0,
+        "adapter_coverage_percent": 100.0,
         "unsupported_completed_items": 0,
         "unsupported_item_types": [],
         "omitted_supported_items": 0,
+        "omitted_supported_item_types": [],
+        "item_type_coverage": [],
     }
     signals = detect_signals(run.events)
     tool_events = [event for event in run.events if event.kind in {"tool", "error"} and event.operation]
@@ -750,13 +753,18 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
     ingestion = analysis["ingestion"]
     lines.extend([
         "", "## Ingestion coverage",
-        f"Adapter: **{ingestion['adapter']}**. Normalized **{ingestion['normalized_events']} of {ingestion['semantic_candidates']}** completed semantic candidate(s) ({ingestion['semantic_coverage_percent']}%).",
+        f"Adapter: **{ingestion['adapter']}**. Supported **{ingestion['adapter_coverage_percent']}%** of completed semantic candidate types; materialized **{ingestion['normalized_events']} of {ingestion['semantic_candidates']}** candidate(s) as events ({ingestion['semantic_coverage_percent']}%).",
         f"Bookkeeping records separated: **{ingestion['bookkeeping_records']}**. Unsupported completed items: **{ingestion['unsupported_completed_items']}**. Supported items omitted for empty content: **{ingestion['omitted_supported_items']}**.",
     ])
     lines.extend([
         f"- `{item['type']}` — {item['count']} item(s)"
         for item in ingestion["unsupported_item_types"]
     ] or ["- No unsupported completed-item types detected."])
+    if ingestion["omitted_supported_item_types"]:
+        lines.extend(["", "Supported empty-content omissions:"] + [
+            f"- `{item['type']}` — {item['count']} item(s)"
+            for item in ingestion["omitted_supported_item_types"]
+        ])
     incidents = analysis["incidents"]
     lines.extend(["", "## Failure incidents", f"Recovered: **{incidents['recovered']}**. Unresolved: **{incidents['unresolved']}**."])
     lines.extend([

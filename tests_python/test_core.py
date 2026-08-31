@@ -64,9 +64,12 @@ def test_generic_trace_and_repetition_signal(tmp_path):
         "semantic_candidates": 5,
         "normalized_events": 5,
         "semantic_coverage_percent": 100.0,
+        "adapter_coverage_percent": 100.0,
         "unsupported_completed_items": 0,
         "unsupported_item_types": [],
         "omitted_supported_items": 0,
+        "omitted_supported_item_types": [],
+        "item_type_coverage": [{"type": "generic", "completed": 5, "normalized": 5, "omitted": 0, "supported": True}],
     }
 
 
@@ -94,9 +97,17 @@ def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
         "semantic_candidates": 5,
         "normalized_events": 5,
         "semantic_coverage_percent": 100.0,
+        "adapter_coverage_percent": 100.0,
         "unsupported_completed_items": 0,
         "unsupported_item_types": [],
         "omitted_supported_items": 0,
+        "omitted_supported_item_types": [],
+        "item_type_coverage": [
+            {"type": "CommandExecution", "completed": 2, "normalized": 2, "omitted": 0, "supported": True},
+            {"type": "FileChange", "completed": 1, "normalized": 1, "omitted": 0, "supported": True},
+            {"type": "McpToolCall", "completed": 1, "normalized": 1, "omitted": 0, "supported": True},
+            {"type": "UserMessage", "completed": 1, "normalized": 1, "omitted": 0, "supported": True},
+        ],
     }
 
 
@@ -135,15 +146,17 @@ def test_ingestion_audit_exposes_schema_drift_empty_items_cli_and_gate(tmp_path,
     assert ingestion["semantic_candidates"] == 8
     assert ingestion["normalized_events"] == 6
     assert ingestion["semantic_coverage_percent"] == 75.0
+    assert ingestion["adapter_coverage_percent"] == 87.5
     assert ingestion["unsupported_completed_items"] == 1
     assert ingestion["unsupported_item_types"] == [{"type": "PlanMutation", "count": 1}]
     assert ingestion["omitted_supported_items"] == 1
+    assert ingestion["omitted_supported_item_types"] == [{"type": "Reasoning", "count": 1}]
     assert ingestion["bookkeeping_records"] == 6
 
     no_report = tmp_path / "must-not-exist.html"
     assert main([str(drift_trace), "--audit-ingestion", "--output", str(no_report)]) == 0
     audit_text = capsys.readouterr().out
-    assert "coverage: 75.0%" in audit_text
+    assert "materialized: 75.0% · adapter coverage: 87.5%" in audit_text
     assert "PlanMutation: 1" in audit_text
     assert not no_report.exists()
     assert main([str(drift_trace), "--audit-ingestion", "--json"]) == 0
@@ -164,6 +177,8 @@ def test_ingestion_audit_exposes_schema_drift_empty_items_cli_and_gate(tmp_path,
     assert "SOURCE-WIDE PARSER COVERAGE" in report
     assert "PARSER DRIFT · 1 UNSUPPORTED" in report
     assert "PlanMutation" in report
+    assert "PROVIDER TYPE MATRIX" in report
+    assert "Reasoning" in report
     assert "including events outside the focused slice" not in report
     focused = slice_run(run, from_event=run.events[0].id, to_event=run.events[1].id)
     assert "including events outside the focused slice" in render_html(focused)
