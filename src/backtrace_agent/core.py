@@ -554,13 +554,17 @@ def parse_trace(source: str | Path, *, name: str | None = None) -> Run:
         candidate = Path(source).expanduser()
         if candidate.exists():
             path = candidate
-    raw = path.read_text(encoding="utf-8", errors="replace") if path else str(source)
+    source_bytes = path.read_bytes() if path else str(source).encode("utf-8")
+    raw = source_bytes.decode("utf-8", errors="replace")
     records = _read_records(raw)
     if not records:
         raise ValueError("No readable JSON or JSONL event objects were found.")
     run_name = name or (path.stem if path else "imported-trace")
     is_codex = any(record.get("type") == "event_msg" and isinstance(record.get("payload"), dict) and record["payload"].get("type") == "item_completed" for record in records)
-    return _parse_codex(records, run_name, raw) if is_codex else _parse_generic(records, run_name, raw)
+    run = _parse_codex(records, run_name, raw) if is_codex else _parse_generic(records, run_name, raw)
+    run.metadata["source_fingerprint"] = f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+    run.metadata["source_bytes"] = len(source_bytes)
+    return run
 
 
 def detect_signals(events: Iterable[Event], *, loop_threshold: int = 3, stall_ms: int = 180_000) -> list[Signal]:

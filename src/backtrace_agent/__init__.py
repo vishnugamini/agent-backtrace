@@ -6,4 +6,4 @@ from .ci import render_junit_xml
 from .core import Event, Run, Signal, Turn, build_restart_brief, detect_signals, parse_trace, suppress_content
 
 __all__ = ["Event", "Run", "Signal", "Turn", "analyze_run", "compare_runs", "evaluate_policy", "render_markdown_summary", "render_junit_xml", "write_evidence_bundle", "verify_evidence_bundle", "build_restart_brief", "detect_signals", "parse_trace", "suppress_content"]
-__version__ = "0.16.0"
+__version__ = "0.17.0"

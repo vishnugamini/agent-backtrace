@@ -22,6 +22,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Separate files actually changed from paths merely mentioned in command output.
 - Build a secret-redacted restart brief at any checkpoint.
 - Export a dependency-free HTML report, sanitized JSON, and an evidence-backed Markdown summary.
+- Fingerprint the exact source trace in every artifact so reviewers can prove where sanitized evidence came from.
 - Compare a current run with a baseline using normalized failure, repetition, stall, tool-time, verification, operation, and file-scope changes.
 
 ## Quick start
@@ -164,7 +165,7 @@ The map includes per-agent action, failure, measured-time, file, and top-operati
 
 Every event has a **Copy checkpoint link** action. Opening that self-contained report URL restores the exact event inspector through a `#event=...` fragment. You can also bookmark events into a local **Review** queue and export the selected sanitized checkpoints as JSON. Bookmarks use browser-local storage scoped to the report session; they do not edit the report or source trace.
 
-`--bundle evidence.zip` creates one portable evidence package containing `report.html`, `normalized.json`, `summary.md`, and `manifest.json`. The manifest records byte sizes and SHA-256 hashes for every review payload. The bundle is deterministic for identical sanitized input and deliberately never includes the raw source trace.
+`--bundle evidence.zip` creates one portable evidence package containing `report.html`, `normalized.json`, `summary.md`, and `manifest.json`. The manifest records byte sizes and SHA-256 hashes for every review payload, plus the SHA-256 fingerprint and byte count of the exact source trace. The bundle is deterministic for identical sanitized input and deliberately never includes the raw source trace.
 
 Verify a received bundle offline, without opening or extracting it:
 
@@ -173,6 +174,14 @@ backtrace-agent --verify-bundle evidence.zip
 ```
 
 Verification requires exactly one copy of every expected file, checks the bundle format and raw-trace exclusion declaration, and recomputes every byte size and SHA-256 hash. It exits `0` when valid, `1` when altered or malformed, and `2` for conflicting CLI usage.
+
+If you also have the original trace, prove that it is the exact input used to create the bundle:
+
+```bash
+backtrace-agent --verify-bundle evidence.zip --verify-source session.jsonl
+```
+
+This reads the candidate trace locally and compares its exact bytes with the provenance stored in the manifest. The raw trace is not copied into the bundle or generated artifacts, and any edit to it changes the result. Older v1 bundles still support payload verification, but cannot be matched to a source trace because they predate source provenance.
 
 The repository also includes a richer browser demo built with React. The Python CLI is the product core; the web demo mirrors the same event model for discoverability.
 

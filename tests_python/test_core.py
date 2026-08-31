@@ -60,7 +60,8 @@ def test_generic_trace_and_repetition_signal(tmp_path):
 
 
 def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
-    run = parse_trace(codex_trace(tmp_path))
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
     assert run.model == "gpt-test"
     assert run.session_id == "session-1"
     assert len(run.events) == 5
@@ -73,6 +74,8 @@ def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
     assert "ghp_" not in exported
     assert "la_abcdefghijklmnopqrstuvwxyz" not in exported
     assert "raw" not in run.events[0].as_dict()
+    assert run.metadata["source_fingerprint"] == f"sha256:{hashlib.sha256(trace.read_bytes()).hexdigest()}"
+    assert run.metadata["source_bytes"] == len(trace.read_bytes())
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):
@@ -201,21 +204,35 @@ def test_side_effect_ledger_and_destructive_gate_are_explicit():
 
 
 def test_evidence_bundle_is_sanitized_complete_and_hash_verified(tmp_path):
-    run = parse_trace(codex_trace(tmp_path))
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
     destination = write_evidence_bundle(run, tmp_path / "evidence.zip")
     duplicate = write_evidence_bundle(run, tmp_path / "evidence-copy.zip")
     assert destination.read_bytes() == duplicate.read_bytes()
     with ZipFile(destination) as archive:
         assert set(archive.namelist()) == {"report.html", "normalized.json", "summary.md", "manifest.json"}
         manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["format"] == "backtrace-evidence-bundle-v2"
         assert manifest["raw_trace_included"] is False
+        assert manifest["source_trace"] == {"sha256": run.metadata["source_fingerprint"], "bytes": len(trace.read_bytes()), "included": False}
         for name, evidence in manifest["files"].items():
             content = archive.read(name)
             assert evidence["sha256"] == hashlib.sha256(content).hexdigest()
             assert evidence["bytes"] == len(content)
         combined = b"\n".join(archive.read(name) for name in archive.namelist())
         assert b"ghp_abcdefghijklmnopqrstuvwxyz" not in combined
-    assert verify_evidence_bundle(destination) == {"valid": True, "files_verified": 3, "errors": []}
+    assert verify_evidence_bundle(destination) == {"valid": True, "files_verified": 3, "source_verified": None, "errors": []}
+    assert verify_evidence_bundle(destination, source_trace=trace)["source_verified"] is True
+    malformed = tmp_path / "malformed-provenance.zip"
+    with ZipFile(destination) as source, ZipFile(malformed, "w") as target:
+        for name in source.namelist():
+            content = source.read(name)
+            if name == "manifest.json":
+                broken_manifest = json.loads(content)
+                broken_manifest["source_trace"].pop("bytes")
+                content = json.dumps(broken_manifest).encode()
+            target.writestr(name, content)
+    assert verify_evidence_bundle(malformed)["errors"] == ["Source-trace provenance is missing or incomplete."]
     tampered = tmp_path / "tampered.zip"
     with ZipFile(destination) as source, ZipFile(tampered, "w") as target:
         for name in source.namelist():
@@ -224,9 +241,32 @@ def test_evidence_bundle_is_sanitized_complete_and_hash_verified(tmp_path):
     verification = verify_evidence_bundle(tampered)
     assert verification["valid"] is False
     assert verification["files_verified"] == 2
+    assert verification["source_verified"] is None
     assert verification["errors"] == ["SHA-256 mismatch for report.html."]
     assert main(["--verify-bundle", str(destination)]) == 0
+    assert main(["--verify-bundle", str(destination), "--verify-source", str(trace)]) == 0
+    assert main(["--verify-source", str(trace)]) == 2
     assert main(["--verify-bundle", str(tampered)]) == 1
+    wrong_source = tmp_path / "wrong.jsonl"
+    wrong_source.write_text("{}")
+    mismatch = verify_evidence_bundle(destination, source_trace=wrong_source)
+    assert mismatch["valid"] is False
+    assert mismatch["source_verified"] is False
+    assert mismatch["errors"] == ["Supplied source trace does not match the bundle provenance."]
+    legacy = tmp_path / "legacy-v1.zip"
+    with ZipFile(destination) as source, ZipFile(legacy, "w") as target:
+        for name in source.namelist():
+            content = source.read(name)
+            if name == "manifest.json":
+                old_manifest = json.loads(content)
+                old_manifest["format"] = "backtrace-evidence-bundle-v1"
+                old_manifest.pop("source_trace")
+                content = json.dumps(old_manifest).encode()
+            target.writestr(name, content)
+    assert verify_evidence_bundle(legacy)["valid"] is True
+    legacy_source_check = verify_evidence_bundle(legacy, source_trace=trace)
+    assert legacy_source_check["valid"] is False
+    assert legacy_source_check["errors"] == ["Bundle does not contain source-trace provenance."]
 
 
 def test_watch_mode_regenerates_all_outputs_atomically(tmp_path):
@@ -242,7 +282,9 @@ def test_watch_mode_regenerates_all_outputs_atomically(tmp_path):
         trace.write_text(trace.read_text(encoding="utf-8") + "\n" + second, encoding="utf-8")
 
     assert _watch(args, trace, _sleep=append_event, _max_cycles=2) == 0
-    assert json.loads(normalized.read_text())["analysis"]["counts"]["events"] == 2
+    watched = json.loads(normalized.read_text())
+    assert watched["analysis"]["counts"]["events"] == 2
+    assert watched["run"]["metadata"]["source_fingerprint"] == f"sha256:{hashlib.sha256(trace.read_bytes()).hexdigest()}"
     assert "Second event" in report.read_text()
     assert "## Agent activity" in summary.read_text()
     assert verify_evidence_bundle(bundle)["valid"] is True

@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backtrace-agent", description="Turn raw AI-agent logs into evidence-backed diagnostics and restart context.")
     parser.add_argument("trace", type=Path, nargs="?", help="JSON/JSONL trace. Omit to use the newest local Codex session.")
     parser.add_argument("--verify-bundle", type=Path, metavar="ZIP", help="Verify an evidence bundle's structure, sizes, and hashes, then exit")
+    parser.add_argument("--verify-source", type=Path, metavar="TRACE", help="With --verify-bundle, prove that TRACE matches the recorded source fingerprint")
     parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
     parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
@@ -231,13 +232,17 @@ def _watch(args: argparse.Namespace, trace: Path, *, _sleep=time.sleep, _max_cyc
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verify_source and not args.verify_bundle:
+        print("backtrace-agent: --verify-source requires --verify-bundle", file=sys.stderr)
+        return 2
     if args.verify_bundle:
         if args.trace or args.watch:
             print("backtrace-agent: do not pass a trace or --watch with --verify-bundle", file=sys.stderr)
             return 2
-        result = verify_evidence_bundle(args.verify_bundle)
+        result = verify_evidence_bundle(args.verify_bundle, source_trace=args.verify_source)
         if result["valid"]:
-            print(f"Bundle verification: PASS · {result['files_verified']} payload(s) verified · {args.verify_bundle.resolve()}")
+            source_status = " · source trace matched" if result["source_verified"] else ""
+            print(f"Bundle verification: PASS · {result['files_verified']} payload(s) verified{source_status} · {args.verify_bundle.resolve()}")
             return 0
         print(f"Bundle verification: FAIL · {args.verify_bundle.resolve()}", file=sys.stderr)
         for error in result["errors"]:

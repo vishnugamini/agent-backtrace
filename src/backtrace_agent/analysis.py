@@ -469,6 +469,7 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
     lines = [
         f"# Backtrace summary: {run.name}", "",
         f"- Source: {run.source}", f"- Session: {run.session_id or 'unknown'}", f"- Model: {run.model or 'unknown'}",
+        f"- Source fingerprint: `{run.metadata.get('source_fingerprint') or 'unavailable'}`", f"- Source bytes: {run.metadata.get('source_bytes', 'unavailable')}",
         f"- Duration: {round(run.duration_ms / 60_000, 1)} minutes", f"- Turns: {counts['turns']}",
         f"- Meaningful events: {counts['events']}", f"- Actions: {counts['actions']} ({counts['failures']} failed)",
         f"- Files changed: {counts['files_changed']}", f"- Diagnostic signals: {counts['signals']}", "",
