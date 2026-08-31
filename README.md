@@ -111,7 +111,9 @@ backtrace-agent --scan ~/.codex/sessions \
   -o session-fleet.html
 ```
 
-The default `attention` scope generates a complete interactive report for each readable critical or attention run and links it from the selected-run panel. Use `--investigation-scope all` to include clean runs too. The dashboard also links a privacy-minimized `manifest.json` containing only status, risk, event counts, fingerprints, and opaque report filenames—never source paths, objectives, models, or raw events. Reports inherit every `--suppress` term. Files are written atomically, and the manifest is written last; reruns never delete unrelated or stale files from the destination directory. Backtrace policy files and investigation manifests are excluded from trace discovery so configuration cannot be mistaken for a run.
+The default `attention` scope generates a complete interactive report for each readable critical or attention run and links it from the selected-run panel. Use `--investigation-scope all` to include clean runs too. An unresolved-incident queue ranks open failures by run risk, retry count, and later work, then deep-links directly to the latest failed event inside the correct report—the event drawer opens automatically at the exact restart point.
+
+The dashboard also links a privacy-minimized `manifest.json` containing status, risk, event counts, fingerprints, opaque report filenames, stable incident/event IDs, and deep links—never source paths, objectives, models, operation text, failure details, or raw events. Reports and incident extraction inherit every `--suppress` term. Files are written atomically, and the manifest is written last; reruns never delete unrelated or stale files from the destination directory. Backtrace policy files and investigation manifests are excluded from trace discovery so configuration cannot be mistaken for a run.
 
 Notify an external automation without putting its URL or secret in shell history:
 

@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote
 
 from .analysis import analyze_run
 from .core import parse_trace, suppress_content
@@ -211,6 +212,7 @@ def write_fleet_investigations(
     destination.mkdir(parents=True, exist_ok=True)
     suppression_terms = list(dict.fromkeys(term.strip() for term in suppress if term.strip()))
     manifest_runs: list[dict[str, Any]] = []
+    incident_queue: list[dict[str, Any]] = []
     eligible = 0
     for item in fleet["runs"]:
         source_path = item.pop("_source_path", None)
@@ -228,6 +230,24 @@ def write_fleet_investigations(
         write_report(run, report_path)
         link = os.path.relpath(report_path, dashboard_path.parent).replace(os.sep, "/")
         item["investigation_report"] = link
+        analysis = analyze_run(run)
+        for incident in analysis["incidents"]["items"]:
+            if incident["status"] != "unresolved":
+                continue
+            event_id = incident["latest_failure_event_id"]
+            fragment = f"#event={quote(event_id, safe='')}"
+            incident_queue.append({
+                "id": incident["id"],
+                "run_id": item["id"],
+                "operation": _short(incident["operation"], 120),
+                "detail": _short((incident["failure_details"] or [""])[-1], 180),
+                "event_id": event_id,
+                "failed_attempts": incident["failed_attempts"],
+                "intervening_actions": incident["intervening_actions"],
+                "risk_score": item["risk_score"],
+                "report": link + fragment,
+                "_manifest_report": filename + fragment,
+            })
         manifest_runs.append({
             "id": item["id"],
             "status": item["status"],
@@ -238,11 +258,32 @@ def write_fleet_investigations(
         })
     for item in fleet["runs"]:
         item.pop("_source_path", None)
+    incident_queue.sort(
+        key=lambda incident: (
+            -incident["risk_score"],
+            -incident["failed_attempts"],
+            -incident["intervening_actions"],
+            incident["run_id"],
+            incident["event_id"],
+        )
+    )
+    manifest_incidents = [
+        {
+            "id": incident["id"],
+            "run_id": incident["run_id"],
+            "event_id": incident["event_id"],
+            "failed_attempts": incident["failed_attempts"],
+            "report": incident.pop("_manifest_report"),
+        }
+        for incident in incident_queue
+    ]
+    fleet["incident_queue"] = incident_queue
     manifest = {
         "schema_version": 1,
         "generated_at": fleet["generated_at"],
         "scope": scope,
         "reports": manifest_runs,
+        "unresolved_incidents": manifest_incidents,
     }
     manifest_path = destination / "manifest.json"
     descriptor, temporary = tempfile.mkstemp(prefix=".manifest.", dir=destination)
@@ -257,6 +298,7 @@ def write_fleet_investigations(
         "scope": scope,
         "eligible_runs": eligible,
         "reports_written": len(manifest_runs),
+        "unresolved_incidents": len(incident_queue),
         "manifest": os.path.relpath(manifest_path, dashboard_path.parent).replace(os.sep, "/"),
     }
     fleet["investigation"] = result
@@ -466,6 +508,9 @@ const time=v=>new Date(v).toLocaleString(),duration=ms=>ms>=60000?`${(ms/60000).
     gate_css = '.fleet-gate{margin:0 0 28px;padding:20px;border:1px solid #9ab8a7;border-left:6px solid var(--green);background:#eef5ef}.fleet-gate.fail{border-color:#d39b8f;border-left-color:var(--red);background:#fbefec}.gate-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.gate-head h2{font:27px Georgia,serif;margin:4px 0}.gate-result{font:800 12px monospace;border:1px solid currentColor;border-radius:999px;padding:7px 10px;color:var(--green)}.fleet-gate.fail .gate-result{color:var(--red)}.gate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}.gate-check{padding:12px;background:var(--surface);border:1px solid var(--line)}.gate-check.fail{border-color:#d39b8f}.gate-check.skip{border-style:dashed}.gate-check strong,.gate-check span,.gate-check small{display:block}.gate-check span{font:9px monospace;color:var(--muted);margin-top:5px}.gate-check small{margin-top:5px;color:#52605a}.delivery{margin:14px 0 0;padding:9px 11px;background:#fffdf799;border-left:3px solid var(--blue);font:11px monospace}.delivery.failed{border-left-color:var(--red)}.delivery.skipped{border-left-color:var(--amber)}.investigation-pack{margin:0 0 28px;padding:20px;border:1px solid #9cb6c9;border-left:6px solid var(--blue);background:#eef4f8;display:flex;align-items:center;justify-content:space-between;gap:20px}.investigation-pack[hidden]{display:none}.investigation-pack h2{font:27px Georgia,serif;margin:4px 0}.investigation-pack p{margin:4px 0;color:#52616b}.investigation-pack .button{text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center}'
     gate_html = '<section class="fleet-gate" id="fleet-gate" hidden><div class="gate-head"><div><div class="kicker">AUTOMATION DECISION</div><h2 id="gate-title"></h2><p id="gate-summary"></p></div><span class="gate-result" id="gate-result"></span></div><div class="gate-grid" id="gate-checks"></div><p class="delivery" id="notification-status" hidden></p></section><section class="investigation-pack" id="investigation-pack" hidden><div><div class="kicker">LINKED INVESTIGATION PACK</div><h2>Open the run, not another command</h2><p id="investigation-summary"></p></div><a class="button secondary" id="manifest-link" target="_blank" rel="noopener">Open manifest</a></section>'
     gate_js = '''const G=F.quality_gate,N=F.notification;if(G?.configured){const gate=$('#fleet-gate');gate.hidden=false;gate.classList.toggle('fail',!G.passed);$('#gate-title').textContent=G.passed?'Fleet gate passed':'Fleet gate failed';$('#gate-result').textContent=G.passed?'PASS':'FAIL';const provenance=G.policy_source?` Policy ${G.policy_source}.`:'';$('#gate-summary').textContent=`${G.summary.passed} passed · ${G.summary.failed} failed · ${G.summary.skipped} skipped.${provenance} Failed configured checks return exit code 1.`;$('#gate-checks').innerHTML=G.checks.map(c=>`<article class="gate-check ${c.skipped?'skip':c.passed?'':'fail'}"><strong>${esc(c.label)}</strong><span>Actual ${esc(c.actual)} · expected ${esc(c.expected)}</span><small>${esc(c.detail)}</small></article>`).join('');if(N?.configured){const delivery=$('#notification-status'),written=N.payload_written?' · exact payload written':'';delivery.hidden=false;delivery.classList.add(N.status);delivery.textContent=N.status==='delivered'?`${N.format} webhook delivered in ${N.attempts} attempt(s) · HTTP ${N.status_code} · ${N.event_id}${written}`:N.status==='skipped'?`${N.format} webhook skipped · ${N.error}${written}`:N.status==='previewed'?`${N.format} webhook previewed without a network request · ${N.event_id}${written}`:`${N.format} webhook delivery failed after ${N.attempts} attempt(s) · ${N.error}${written}`}}if(F.investigation?.configured){$('#investigation-pack').hidden=false;$('#investigation-summary').textContent=`${F.investigation.reports_written} full report(s) generated for ${F.investigation.scope==='all'?'all readable runs':'runs needing attention'}. Select a linked run below or inspect the privacy-minimized manifest.`;$('#manifest-link').href=F.investigation.manifest;}'''
+    gate_css += '.incident-queue{margin:0 0 28px;padding:20px;border:1px solid #d5b48b;border-left:6px solid var(--amber);background:#fbf3e6}.incident-queue[hidden]{display:none}.incident-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.incident-head h2{font:27px Georgia,serif;margin:4px 0}.incident-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.fleet-incident{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);padding:13px}.fleet-incident:hover{border-color:var(--amber);transform:translateY(-1px)}.fleet-incident strong,.fleet-incident span,.fleet-incident small,.fleet-incident b{display:block}.fleet-incident span{font:9px monospace;color:var(--muted);margin:5px 0}.fleet-incident small{color:#52605a}.fleet-incident b{font:800 9px monospace;color:var(--green);margin-top:9px;letter-spacing:.05em}'
+    gate_html += '<section class="incident-queue" id="incident-queue" hidden><div class="incident-head"><div><div class="kicker">UNRESOLVED INCIDENT QUEUE</div><h2>Jump to the exact failure</h2><p>Ranked by run risk, failed attempts, and work performed afterward.</p></div><span class="pill warn" id="incident-count"></span></div><div class="incident-list" id="incident-list"></div></section>'
+    gate_js += '''if(F.incident_queue?.length){$('#incident-queue').hidden=false;$('#incident-count').textContent=`${F.incident_queue.length} unresolved`;$('#incident-list').innerHTML=F.incident_queue.map(i=>{const run=F.runs.find(r=>r.id===i.run_id);return `<a class="fleet-incident" href="${esc(i.report)}" target="_blank" rel="noopener"><strong>${esc(i.operation)}</strong><span>${esc(run?.name||i.run_id)} · risk ${i.risk_score} · ${i.failed_attempts} failed attempt(s) · ${i.intervening_actions} later action(s)</span><small>${esc(i.detail||'No failure detail recovered.')}</small><b>OPEN EXACT FAILURE →</b></a>`}).join('');}'''
     template = template.replace('.trend{', gate_css + '.trend{', 1)
     template = template.replace('<section class="trend" id="trend" hidden>', gate_html + '<section class="trend" id="trend" hidden>', 1)
     template = template.replace("if(F.history){", gate_js + "if(F.history){", 1)
@@ -480,6 +525,7 @@ const time=v=>new Date(v).toLocaleString(),duration=ms=>ms>=60000?`${(ms/60000).
         1,
     )
     template = template.replace('@media(max-width:850px){.metrics,.trend-cards', '@media(max-width:850px){.gate-grid{grid-template-columns:1fr 1fr}.metrics,.trend-cards', 1)
+    template = template.replace('@media(max-width:850px){.gate-grid{', '@media(max-width:850px){.incident-list{grid-template-columns:1fr}.gate-grid{', 1)
     template = template.replace('@media(max-width:520px){.shell', '@media(max-width:520px){.gate-head{display:block}.gate-result{display:inline-block;margin-top:8px}.gate-grid{grid-template-columns:1fr}.investigation-pack{display:block}.investigation-pack .button{margin-top:10px}.shell', 1)
     return template
 
