@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
 import webbrowser
 from pathlib import Path
 
-from .analysis import analyze_run, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
+from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
@@ -63,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent", action="append", default=[], metavar="NAME", help="Include only this agent in a focused report; repeatable")
     parser.add_argument("--incident", metavar="EVENT_OR_INCIDENT_ID", help="Automatically focus the complete incident containing this failure or recovery")
     parser.add_argument("--context-events", type=nonnegative_int, metavar="N", help="Include N events before and after --incident evidence (default: 3)")
+    parser.add_argument("--list-incidents", action="store_true", help="Print a compact incident catalog with stable --incident references, then exit")
+    parser.add_argument("--incident-status", choices=("all", "recovered", "unresolved"), default="all", help="Filter --list-incidents by recovery status (default: all)")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -253,6 +256,36 @@ def _watch(args: argparse.Namespace, trace: Path, *, _sleep=time.sleep, _max_cyc
         return last_exit
 
 
+def _list_incidents(args: argparse.Namespace, trace: Path) -> int:
+    try:
+        run = parse_trace(trace)
+        if args.suppress:
+            run = suppress_content(run, args.suppress)
+        catalog = catalog_incidents(run, agents=args.agent, status=args.incident_status)
+    except (OSError, ValueError) as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(catalog, indent=2, ensure_ascii=False))
+        return 0
+    summary = catalog["summary"]
+    filters = catalog["filters"]
+    filter_text = f" · status: {filters['status']}"
+    if filters["agents"]:
+        filter_text += f" · agents: {', '.join(filters['agents'])}"
+    print(f"Incidents: {summary['total']} · {summary['unresolved']} unresolved · {summary['recovered']} recovered{filter_text}")
+    print(f"Source: {trace.resolve()}")
+    if not catalog["incidents"]:
+        print("No matching failure incidents detected.")
+        return 0
+    for item in catalog["incidents"]:
+        recovery = item["recovery_event_id"] or "not recovered"
+        print(f"{item['number']:>2}. {item['status'].upper():<10} {item['operation']} · {item['failed_attempts']} failed · agents: {', '.join(item['agents'])}")
+        print(f"    Reference: {item['focus_reference']} · Recovery: {recovery}")
+        print(f"    Focus: backtrace-agent {shlex.quote(str(trace))} --incident {shlex.quote(item['focus_reference'])} -o incident-report.html")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify_source and not args.verify_bundle:
@@ -276,6 +309,15 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
         return 2
+    if args.incident_status != "all" and not args.list_incidents:
+        print("backtrace-agent: --incident-status requires --list-incidents", file=sys.stderr)
+        return 2
+    if args.list_incidents:
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare
+        if conflicting:
+            print("backtrace-agent: --list-incidents cannot be combined with watch, comparison, or focused-output options", file=sys.stderr)
+            return 2
+        return _list_incidents(args, trace)
     return _watch(args, trace) if args.watch else _process_once(args, trace)
 
 

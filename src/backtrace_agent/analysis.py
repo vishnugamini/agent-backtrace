@@ -390,6 +390,60 @@ def focus_incident(
     return focused
 
 
+def catalog_incidents(
+    run: Run,
+    *,
+    agents: list[str] | None = None,
+    status: str = "all",
+) -> dict[str, Any]:
+    """Return a compact, script-safe incident index with stable focus references."""
+    if status not in {"all", "recovered", "unresolved"}:
+        raise ValueError("Incident status must be all, recovered, or unresolved.")
+    requested_agents = list(dict.fromkeys(agent.strip() for agent in (agents or []) if agent.strip()))
+    available_agents = {agent.casefold(): agent for agent in run.agents}
+    unknown_agents = [agent for agent in requested_agents if agent.casefold() not in available_agents]
+    if unknown_agents:
+        raise ValueError(
+            f"Unknown --agent value(s): {', '.join(unknown_agents)}. "
+            f"Available agents: {', '.join(run.agents)}"
+        )
+    selected_agent_keys = {agent.casefold() for agent in requested_agents}
+    events_by_id = {event.id: event for event in run.events}
+    items = []
+    for incident in analyze_run(run)["incidents"]["items"]:
+        evidence_ids = [*incident["failure_event_ids"]]
+        if incident.get("recovery_event_id"):
+            evidence_ids.append(incident["recovery_event_id"])
+        evidence_agents = list(dict.fromkeys(events_by_id[event_id].agent for event_id in evidence_ids))
+        if status != "all" and incident["status"] != status:
+            continue
+        if selected_agent_keys and not any(agent.casefold() in selected_agent_keys for agent in evidence_agents):
+            continue
+        items.append({
+            "number": len(items) + 1,
+            "id": incident["id"],
+            "focus_reference": incident["first_failure_event_id"],
+            "operation": incident["operation"],
+            "status": incident["status"],
+            "failed_attempts": incident["failed_attempts"],
+            "failure_event_ids": incident["failure_event_ids"],
+            "recovery_event_id": incident.get("recovery_event_id"),
+            "time_to_recovery_ms": incident.get("time_to_recovery_ms"),
+            "agents": evidence_agents,
+            "turn_id": incident.get("turn_id"),
+        })
+    return {
+        "run": {"name": run.name, "session_id": run.session_id, "source": run.source},
+        "filters": {"status": status, "agents": [available_agents[agent.casefold()] for agent in requested_agents]},
+        "summary": {
+            "total": len(items),
+            "recovered": sum(item["status"] == "recovered" for item in items),
+            "unresolved": sum(item["status"] == "unresolved" for item in items),
+        },
+        "incidents": items,
+    }
+
+
 def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
     """Compare two runs using normalized metrics and explain every conclusion."""
     current_analysis = analyze_run(current)

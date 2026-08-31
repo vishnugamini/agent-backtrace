@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, catalog_incidents, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
@@ -192,6 +192,42 @@ def test_automatic_incident_focus_expands_recovery_and_handles_unresolved_runs(t
     assert json.loads(normalized.read_text())["run"]["metadata"]["scope"]["incident"]["status"] == "recovered"
     assert main([str(trace), "--context-events", "1", "-o", str(report)]) == 2
     assert main([str(trace), "--incident", "e-2001000", "--from-event", "e-2001000", "-o", str(report)]) == 2
+
+
+def test_incident_catalog_supports_text_json_and_filters_without_writing_report(tmp_path, capsys):
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
+    catalog = catalog_incidents(run)
+    assert catalog["summary"] == {"total": 1, "recovered": 1, "unresolved": 0}
+    assert catalog["incidents"][0]["focus_reference"] == "e-2001000"
+    assert catalog["incidents"][0]["agents"] == ["codex"]
+    assert catalog_incidents(run, status="unresolved")["incidents"] == []
+    assert catalog_incidents(run, agents=["user"])["incidents"] == []
+    with pytest.raises(ValueError, match="Unknown --agent"):
+        catalog_incidents(run, agents=["reviewer"])
+    assert catalog_incidents(Run("clean", "test", [Event("ok", 0, "codex", "tool", "Passed", "", operation="test")]))["summary"]["total"] == 0
+
+    assert main([str(trace), "--list-incidents"]) == 0
+    text_output = capsys.readouterr().out
+    assert "1 · 0 unresolved · 1 recovered" in text_output
+    assert "--incident e-2001000" in text_output
+    assert not (tmp_path / "backtrace-report.html").exists()
+
+    assert main([str(trace), "--list-incidents", "--json", "--incident-status", "recovered"]) == 0
+    json_output = json.loads(capsys.readouterr().out)
+    assert json_output["summary"]["recovered"] == 1
+    assert json_output["incidents"][0]["recovery_event_id"] == "e-2003000"
+
+    assert main([str(trace), "--list-incidents", "--agent", "user"]) == 0
+    assert "No matching failure incidents detected." in capsys.readouterr().out
+    assert main([str(trace), "--incident-status", "unresolved"]) == 2
+    capsys.readouterr()
+
+    html = render_html(run)
+    assert 'data-copy-incident="e-2001000"' in html
+    assert "backtrace-agent TRACE --incident" in html
+    assert "Copy command template" in html
+    assert "Template copied" in html
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):

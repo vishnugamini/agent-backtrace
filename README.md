@@ -104,6 +104,16 @@ backtrace-agent run.jsonl \
 
 `--incident` accepts the incident ID, any failed event in that incident, or its recovery event. Recovered incidents end at the first later successful action with the same normalized operation; unresolved incidents end at their latest failed attempt. `--context-events` adds surrounding normalized events on each side (default: 3). The generated scope records the operation, recovery state, anchor IDs, and context size. When combined with `--agent`, Backtrace refuses to hide any failure or recovery event required to understand the incident.
 
+Discover stable incident references without generating a report first:
+
+```bash
+backtrace-agent run.jsonl --list-incidents
+backtrace-agent run.jsonl --list-incidents --incident-status unresolved
+backtrace-agent run.jsonl --list-incidents --agent builder --json > incidents.json
+```
+
+The text catalog includes a complete focus command for every match. `--incident-status` accepts `all`, `recovered`, or `unresolved`; repeatable `--agent` filters by the agents present in failure and recovery evidence. Adding `--json` returns the same privacy-safe catalog as structured JSON for scripts and CI. Catalog mode exits without writing or refreshing HTML, bundles, summaries, or normalized trace files. The report's Incidents view also offers a command template for each incident; replace its `TRACE` placeholder with the source path.
+
 Enforce agent-run quality in CI:
 
 ```bash
