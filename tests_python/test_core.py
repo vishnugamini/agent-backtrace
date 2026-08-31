@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from backtrace_agent.analysis import analyze_run, catalog_incidents, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
-from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
+from backtrace_agent.cli import _watch, build_fleet_policy_spec, build_parser, build_policy_spec, load_fleet_policy, load_policy, main
 from backtrace_agent.ci import render_fleet_junit_xml, render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
@@ -451,6 +451,68 @@ def test_fleet_gates_skip_missing_baselines_fail_ci_and_export_junit(tmp_path, c
     assert "trend gate options require --history" in capsys.readouterr().err
     assert main([str(failed), "--max-fleet-unresolved", "0"]) == 2
     assert "fleet gate options require --scan" in capsys.readouterr().err
+
+
+def test_fleet_policy_is_strict_overridable_and_preserves_provenance(tmp_path, capsys):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "failure"}}], "failed.jsonl")
+    history = tmp_path / "history.json"
+    report = tmp_path / "fleet.html"
+    junit = tmp_path / "fleet.xml"
+    policy = tmp_path / "team-fleet.json"
+    policy.write_text(json.dumps({
+        "max_fleet_needs_attention": 0,
+        "max_fleet_unresolved": 0,
+        "max_new_attention": 0,
+        "fail_on_fleet_regression": False,
+    }))
+    assert load_fleet_policy(policy)["max_fleet_unresolved"] == 0
+    parsed = build_parser().parse_args([
+        "--scan", str(root), "--fleet-policy", str(policy),
+        "--max-fleet-needs-attention", "3", "--fail-on-fleet-regression", "--history", str(history),
+    ])
+    merged = build_fleet_policy_spec(parsed)
+    assert merged["max_fleet_needs_attention"] == 3
+    assert merged["max_fleet_unresolved"] == 0
+    assert merged["fail_on_fleet_regression"] is True
+
+    assert main([
+        "--scan", str(root), "--fleet-policy", str(policy), "--history", str(history),
+        "--max-fleet-unresolved", "2", "--max-fleet-needs-attention", "2",
+        "--fail-on-fleet-regression",
+        "--junit-output", str(junit), "--json", "-o", str(report),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["quality_gate"]["policy_source"] == policy.name
+    checks = {item["key"]: item for item in result["quality_gate"]["checks"]}
+    assert checks["max_fleet_unresolved"]["expected"] == "at most 2"
+    report_text = report.read_text()
+    assert f'"policy_source": "{policy.name}"' in report_text
+    assert "Policy ${G.policy_source}." in report_text
+    xml = ET.parse(junit).getroot()
+    assert xml.find("./properties/property[@name='policy']").attrib["value"] == policy.name
+
+    for value, error in [
+        ({}, "at least one gate"),
+        ({"fail_on_fleet_regression": False}, "at least one gate"),
+        ({"unknown": 0}, "Unknown fleet policy"),
+        ({"max_fleet_unresolved": -1}, "nonnegative integer"),
+        ({"max_fleet_unresolved": True}, "nonnegative integer"),
+        ({"fail_on_fleet_regression": 1}, "true or false"),
+        (["not", "an", "object"], "JSON object"),
+    ]:
+        invalid = tmp_path / "invalid.json"
+        invalid.write_text(json.dumps(value))
+        with pytest.raises(ValueError, match=error):
+            load_fleet_policy(invalid)
+
+    assert main(["--fleet-policy", str(policy)]) == 2
+    assert "--fleet-policy requires --scan" in capsys.readouterr().err
+    trend_only = tmp_path / "trend-only.json"
+    trend_only.write_text(json.dumps({"max_new_attention": 0}))
+    assert main(["--scan", str(root), "--fleet-policy", str(trend_only), "-o", str(report)]) == 2
+    assert "trend gate options require --history" in capsys.readouterr().err
 
 
 def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys, monkeypatch):

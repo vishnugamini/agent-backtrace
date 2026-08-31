@@ -1,0 +1,7 @@
+{
+  "max_fleet_needs_attention": 5,
+  "max_fleet_unresolved": 0,
+  "max_fleet_source_issues": 0,
+  "max_new_attention": 0,
+  "fail_on_fleet_regression": true
+}

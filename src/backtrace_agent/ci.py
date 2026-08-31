@@ -57,6 +57,8 @@ def render_fleet_junit_xml(fleet: dict, quality_gate: dict) -> str:
     properties = ET.SubElement(suite, "properties")
     ET.SubElement(properties, "property", {"name": "generated_at", "value": fleet["generated_at"]})
     ET.SubElement(properties, "property", {"name": "runs", "value": str(fleet["summary"]["runs"])})
+    if quality_gate.get("policy_source"):
+        ET.SubElement(properties, "property", {"name": "policy", "value": quality_gate["policy_source"]})
     if not checks:
         case = ET.SubElement(suite, "testcase", {"classname": "backtrace.fleet", "name": "No fleet gates configured"})
         ET.SubElement(case, "skipped", {"message": "No fleet gate flags were supplied."})

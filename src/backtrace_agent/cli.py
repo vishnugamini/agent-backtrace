@@ -24,6 +24,8 @@ NUMBER_POLICY_KEYS = {"max_failure_rate", "max_tokens_per_action", "min_cache_ra
 BOOLEAN_POLICY_KEYS = {"require_evidence", "fail_on_regression"}
 POLICY_KEYS = INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS | BOOLEAN_POLICY_KEYS
 FLEET_INTEGER_GATE_KEYS = {"max_fleet_needs_attention", "max_fleet_unresolved", "max_fleet_source_issues", "max_new_attention"}
+FLEET_BOOLEAN_GATE_KEYS = {"fail_on_fleet_regression"}
+FLEET_POLICY_KEYS = FLEET_INTEGER_GATE_KEYS | FLEET_BOOLEAN_GATE_KEYS
 
 
 def nonnegative_int(value: str) -> int:
@@ -63,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-limit", type=positive_int, default=50, metavar="N", help="Maximum newest trace files to inspect with --scan (default: 50)")
     parser.add_argument("--history", type=Path, metavar="JSON", help="With --scan, append a privacy-minimized snapshot and show fleet trends")
     parser.add_argument("--history-limit", type=positive_int, default=50, metavar="N", help="Maximum snapshots retained by --history (default: 50)")
+    parser.add_argument("--fleet-policy", type=Path, metavar="JSON", help="With --scan, load reusable fleet-gate thresholds from a validated JSON policy")
     parser.add_argument("--max-fleet-needs-attention", type=nonnegative_int, metavar="N", help="With --scan, fail when more than N runs need attention")
     parser.add_argument("--max-fleet-unresolved", type=nonnegative_int, metavar="N", help="With --scan, fail when unresolved incidents exceed N")
     parser.add_argument("--max-fleet-source-issues", type=nonnegative_int, metavar="N", help="With --scan, fail when source-integrity issues exceed N")
@@ -145,6 +148,34 @@ def load_policy(path: Path) -> dict:
             raise ValueError(f"Policy key {key} must be a nonnegative integer.")
         if key in NUMBER_POLICY_KEYS and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
             raise ValueError(f"Policy key {key} must be a nonnegative number.")
+    return policy
+
+
+def load_fleet_policy(path: Path) -> dict:
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read fleet policy {path}: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("Fleet policy must be a JSON object.")
+    unknown = sorted(set(policy) - FLEET_POLICY_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown fleet policy key(s): {', '.join(unknown)}")
+    for key, value in policy.items():
+        if key in FLEET_BOOLEAN_GATE_KEYS and not isinstance(value, bool):
+            raise ValueError(f"Fleet policy key {key} must be true or false.")
+        if key in FLEET_INTEGER_GATE_KEYS and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"Fleet policy key {key} must be a nonnegative integer.")
+    if not any(key in FLEET_INTEGER_GATE_KEYS or value is True for key, value in policy.items()):
+        raise ValueError("Fleet policy must configure at least one gate.")
+    return policy
+
+
+def build_fleet_policy_spec(args: argparse.Namespace) -> dict:
+    policy = load_fleet_policy(args.fleet_policy) if args.fleet_policy else {}
+    policy.update({key: getattr(args, key) for key in FLEET_INTEGER_GATE_KEYS if getattr(args, key) is not None})
+    if args.fail_on_fleet_regression:
+        policy["fail_on_fleet_regression"] = True
     return policy
 
 
@@ -445,9 +476,9 @@ def _scan(args: argparse.Namespace) -> int:
         fleet = scan_traces(args.scan, limit=args.scan_limit, suppress=args.suppress)
         if args.history:
             fleet["history"] = update_fleet_history(fleet, args.history, limit=args.history_limit)
-        gate_spec = {key: getattr(args, key) for key in FLEET_INTEGER_GATE_KEYS}
-        gate_spec["fail_on_fleet_regression"] = args.fail_on_fleet_regression
-        fleet["quality_gate"] = evaluate_fleet_gate(fleet, gate_spec)
+        fleet["quality_gate"] = evaluate_fleet_gate(fleet, args._fleet_gate_spec)
+        if args.fleet_policy:
+            fleet["quality_gate"]["policy_source"] = args.fleet_policy.name
         fleet["notification"] = {"configured": False, "status": "not_configured", "format": args.webhook_format, "payload_written": False, "attempts": 0, "status_code": None, "error": None, "event_id": None}
         if args.webhook_url_env or args.webhook_payload_output:
             payload = build_fleet_notification(fleet)
@@ -501,6 +532,8 @@ def _scan(args: argparse.Namespace) -> int:
                 f"Fleet gate: {'PASS' if fleet['quality_gate']['passed'] else 'FAILED'} · "
                 f"{gate_summary['passed']} passed · {gate_summary['failed']} failed · {gate_summary['skipped']} skipped"
             )
+            if fleet["quality_gate"].get("policy_source"):
+                print(f"Fleet policy: {fleet['quality_gate']['policy_source']}")
         if fleet["notification"]["configured"]:
             notification = fleet["notification"]
             suffix = f" · HTTP {notification['status_code']}" if notification["status_code"] is not None else ""
@@ -523,14 +556,22 @@ def _scan(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    fleet_gate_requested = args.fail_on_fleet_regression or any(getattr(args, key) is not None for key in FLEET_INTEGER_GATE_KEYS)
+    if args.fleet_policy and not args.scan:
+        print("backtrace-agent: --fleet-policy requires --scan", file=sys.stderr)
+        return 2
+    try:
+        args._fleet_gate_spec = build_fleet_policy_spec(args)
+    except ValueError as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    fleet_gate_requested = bool(args._fleet_gate_spec)
     if fleet_gate_requested and not args.scan:
         print("backtrace-agent: fleet gate options require --scan", file=sys.stderr)
         return 2
     if args.history and not args.scan:
         print("backtrace-agent: --history requires --scan", file=sys.stderr)
         return 2
-    if (args.fail_on_fleet_regression or args.max_new_attention is not None) and not args.history:
+    if (args._fleet_gate_spec.get("fail_on_fleet_regression") or args._fleet_gate_spec.get("max_new_attention") is not None) and not args.history:
         print("backtrace-agent: trend gate options require --history", file=sys.stderr)
         return 2
     notification_requested = bool(args.webhook_url_env or args.webhook_payload_output)

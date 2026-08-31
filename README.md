@@ -91,6 +91,18 @@ backtrace-agent --scan ~/.codex/sessions \
 
 Fleet gates are included in HTML and `--json`, and a failed configured check returns exit code 1. Current-state gates cover runs needing attention, unresolved incidents, and source-integrity issues. Trend gates cover new risky runs and worsened run statuses. Trend checks are explicitly skipped on the first snapshot because there is no previous scan to compare; JUnit preserves that skipped state instead of reporting invented evidence.
 
+Keep fleet rules reviewable in version control instead of repeating a fragile set of flags:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --history ~/.local/share/backtrace/fleet-history.json \
+  --fleet-policy examples/fleet-policy.json \
+  --junit-output fleet-quality.xml \
+  -o session-fleet.html
+```
+
+Fleet policy files accept only the five documented fleet keys, reject unknown keys, invalid types, negative thresholds, empty objects, and ineffective `false`-only configurations. Explicit numeric flags override matching file values; `--fail-on-fleet-regression` enables that check even when the file disables it. Trend rules still require `--history`. The policy filename appears in terminal output, HTML, `--json`, and JUnit so every decision points back to its reviewed rule set.
+
 Notify an external automation without putting its URL or secret in shell history:
 
 ```bash
