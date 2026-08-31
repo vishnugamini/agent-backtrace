@@ -10,7 +10,7 @@ from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
-from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, suppress_content
+from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
 from backtrace_agent.report import render_html
 
 
@@ -106,6 +106,53 @@ def test_analysis_separates_changed_and_referenced_files(tmp_path):
     assert "## Agent activity" in markdown
     assert "## Token economics" in markdown
     assert "## Failure incidents" in markdown
+
+
+def test_focused_slice_rebases_events_marks_partial_turns_and_omits_cumulative_tokens(tmp_path):
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
+    focused = slice_run(run, from_event="e-2001000", to_event="e-2003000", agents=["CODEX"])
+    assert [event.id for event in focused.events] == ["e-2001000", "e-2002000", "e-2003000"]
+    assert [event.at_ms for event in focused.events] == [0, 1000, 2000]
+    assert focused.tokens == {}
+    assert focused.metadata["source_fingerprint"] == run.metadata["source_fingerprint"]
+    assert focused.metadata["scope"] == {
+        "active": True,
+        "from_event": "e-2001000",
+        "to_event": "e-2003000",
+        "agents": ["codex"],
+        "source_event_count": 5,
+        "selected_event_count": 3,
+        "selected_first_event": "e-2001000",
+        "selected_last_event": "e-2003000",
+        "original_start_ms": 1000,
+        "original_end_ms": 3500,
+        "timeline_rebased": True,
+        "cumulative_token_counters_removed": True,
+    }
+    assert focused.turns[0].status == "partial"
+    assert focused.turns[0].final_response == ""
+    assert analyze_run(focused)["turns"][0]["status"] == "partial"
+    assert "Focused slice: **3 of 5 events**" in render_markdown_summary(focused)
+    assert "FOCUSED 3/5" in render_html(focused)
+    assert "partial turn" in render_html(focused)
+    assert "id=\"tokens\"" not in render_html(focused)
+    assert "## Scope warning" in build_restart_brief(focused)
+    with pytest.raises(ValueError, match="Unknown --agent"):
+        slice_run(run, agents=["reviewer"])
+    with pytest.raises(ValueError, match="occurs after"):
+        slice_run(run, from_event="e-2003000", to_event="e-2001000")
+    normalized = tmp_path / "focused.json"
+    report = tmp_path / "focused.html"
+    bundle = tmp_path / "focused.zip"
+    assert main([
+        str(trace), "--from-event", "e-2001000", "--to-event", "e-2003000", "--agent", "codex",
+        "--normalized-output", str(normalized), "--bundle", str(bundle), "-o", str(report),
+    ]) == 0
+    cli_payload = json.loads(normalized.read_text())
+    assert cli_payload["run"]["metadata"]["scope"]["selected_event_count"] == 3
+    assert verify_evidence_bundle(bundle, source_trace=trace)["source_verified"] is True
+    assert main([str(trace), "--from-event", "e-2001000", "--compare", str(trace), "-o", str(report)]) == 2
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):

@@ -23,6 +23,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Build a secret-redacted restart brief at any checkpoint.
 - Export a dependency-free HTML report, sanitized JSON, and an evidence-backed Markdown summary.
 - Fingerprint the exact source trace in every artifact so reviewers can prove where sanitized evidence came from.
+- Extract an inclusive event range or selected agents into an honestly scoped incident report instead of sharing an entire run.
 - Compare a current run with a baseline using normalized failure, repetition, stall, tool-time, verification, operation, and file-scope changes.
 
 ## Quick start
@@ -77,6 +78,19 @@ backtrace-agent run.jsonl \
 ```
 
 `--suppress` is repeatable and case-insensitive. It removes matching whole terms from lines, paths, and exportable metadata without modifying the source trace. The report records how many items were removed without exposing the suppression terms themselves.
+
+Extract a focused failure, handoff, or review window from a large trace:
+
+```bash
+backtrace-agent run.jsonl \
+  --from-event exec-failed-42 \
+  --to-event exec-recovered-57 \
+  --agent codex \
+  --bundle focused-evidence.zip \
+  -o focused-report.html
+```
+
+Event boundaries are inclusive and `--agent` is repeatable and case-insensitive. Focused artifacts retain the fingerprint of the complete source trace, record the exact range and selection in HTML, JSON, Markdown, and the bundle manifest, and rebase the visible timeline to the first selected event. Partial turns are labeled as such. Cumulative token counters are omitted because a session-wide counter cannot be truthfully attributed to a slice. Focused slicing is intentionally incompatible with `--compare`, whose event IDs and boundaries belong to a different run.
 
 Enforce agent-run quality in CI:
 

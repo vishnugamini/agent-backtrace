@@ -12,7 +12,7 @@ from pathlib import Path
 from .analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
-from .core import build_restart_brief, detect_signals, parse_trace, suppress_content
+from .core import build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
 from .report import write_report
 
 
@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bundle", type=Path, metavar="ZIP", help="Write a sanitized evidence bundle with report, JSON, summary, and hash manifest")
     parser.add_argument("--policy", type=Path, metavar="JSON", help="Load reusable quality-gate thresholds from a validated JSON policy")
     parser.add_argument("--compare", type=Path, metavar="BASELINE", help="Compare this run with a baseline JSON/JSONL trace")
+    parser.add_argument("--from-event", metavar="EVENT_ID", help="Focus generated artifacts at this normalized event ID (inclusive)")
+    parser.add_argument("--to-event", metavar="EVENT_ID", help="Focus generated artifacts at this normalized event ID (inclusive)")
+    parser.add_argument("--agent", action="append", default=[], metavar="NAME", help="Include only this agent in a focused report; repeatable")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -143,6 +146,11 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     try:
         run = parse_trace(trace)
         baseline = parse_trace(args.compare) if args.compare else None
+        focused = bool(args.from_event or args.to_event or args.agent)
+        if focused and baseline:
+            raise ValueError("Focused slicing cannot be combined with --compare because event ranges are run-specific.")
+        if focused:
+            run = slice_run(run, from_event=args.from_event, to_event=args.to_event, agents=args.agent)
         if args.suppress:
             run = suppress_content(run, args.suppress)
             baseline = suppress_content(baseline, args.suppress) if baseline else None
@@ -169,6 +177,10 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     suppression = run.metadata.get("custom_suppression") or {}
     if suppression:
         print(f"Custom suppression: removed {suppression.get('removed_items', 0)} matching line(s), path(s), or metadata item(s)")
+    scope = run.metadata.get("scope") or {}
+    if scope.get("active"):
+        agent_text = f" · agents: {', '.join(scope['agents'])}" if scope.get("agents") else ""
+        print(f"Focus: {scope['selected_event_count']}/{scope['source_event_count']} events · {scope['from_event']} → {scope['to_event']}{agent_text}")
     if comparison:
         summary = comparison["summary"]
         print(f"Comparison: {comparison['verdict']} · {summary['regressions']} regression(s) · {summary['improvements']} improvement(s) vs {args.compare.resolve()}")

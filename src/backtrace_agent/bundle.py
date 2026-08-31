@@ -39,7 +39,7 @@ def write_evidence_bundle(
     }
     manifest = {
         "format": "backtrace-evidence-bundle-v2",
-        "run": {"name": run.name, "session_id": run.session_id, "source": run.source},
+        "run": {"name": run.name, "session_id": run.session_id, "source": run.source, "scope": run.metadata.get("scope")},
         "source_trace": {
             "sha256": run.metadata.get("source_fingerprint"),
             "bytes": run.metadata.get("source_bytes"),

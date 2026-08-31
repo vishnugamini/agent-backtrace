@@ -17,6 +17,7 @@ class TurnSummary:
     actions: int
     files_changed: int
     failures: int
+    status: str
     final_response: str
 
     def as_dict(self) -> dict[str, Any]:
@@ -105,7 +106,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
             turn.id, _short(turn.user_request, 260), turn.duration_ms,
             sum(event.kind in {"tool", "file", "handoff", "error"} for event in events),
             len(set(path for event in events if event.kind == "file" for path in event.files)),
-            sum(event.status == "error" for event in events), _short(turn.final_response, 320),
+            sum(event.status == "error" for event in events), turn.status, _short(turn.final_response, 320),
         ))
 
     milestones = [
@@ -295,7 +296,11 @@ def analyze_run(run: Run) -> dict[str, Any]:
             "tokens_per_action": tokens_per_action,
             "output_share_percent": round(output_tokens / total_tokens * 100, 1) if total_tokens else None,
             "reasoning_share_percent": round(reasoning_tokens / output_tokens * 100, 1) if output_tokens else None,
-            "counter_scope": "recorded cumulative session usage; not a billing estimate",
+            "counter_scope": (
+                "unavailable for focused slices because source counters are cumulative session usage"
+                if run.metadata.get("scope", {}).get("active")
+                else "recorded cumulative session usage; not a billing estimate"
+            ),
         },
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
         "privacy": {
@@ -466,17 +471,28 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
 def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, quality_gate: dict[str, Any] | None = None) -> str:
     analysis = analyze_run(run)
     counts = analysis["counts"]
+    scope = run.metadata.get("scope") or {}
+    scope_lines = []
+    if scope.get("active"):
+        agent_text = ", ".join(scope.get("agents") or []) or "all agents"
+        scope_lines = [
+            f"- Focused slice: **{scope['selected_event_count']} of {scope['source_event_count']} events**",
+            f"- Source range: `{scope['from_event']}` through `{scope['to_event']}` (inclusive)",
+            f"- Agents: {agent_text}",
+            "- Token counters: omitted because the source records cumulative session usage",
+        ]
     lines = [
         f"# Backtrace summary: {run.name}", "",
         f"- Source: {run.source}", f"- Session: {run.session_id or 'unknown'}", f"- Model: {run.model or 'unknown'}",
         f"- Source fingerprint: `{run.metadata.get('source_fingerprint') or 'unavailable'}`", f"- Source bytes: {run.metadata.get('source_bytes', 'unavailable')}",
+        *scope_lines,
         f"- Duration: {round(run.duration_ms / 60_000, 1)} minutes", f"- Turns: {counts['turns']}",
         f"- Meaningful events: {counts['events']}", f"- Actions: {counts['actions']} ({counts['failures']} failed)",
         f"- Files changed: {counts['files_changed']}", f"- Diagnostic signals: {counts['signals']}", "",
         "## Objective", run.goal or "No persistent goal was recorded.", "", "## Turn-by-turn",
     ]
     for turn in analysis["turns"]:
-        lines.extend([f"### {turn['request'] or 'Turn without recovered request'}", f"- Duration: {round(turn['duration_ms']/1000, 1)}s", f"- Actions: {turn['actions']}", f"- Files changed: {turn['files_changed']}", f"- Failures: {turn['failures']}", f"- Outcome: {turn['final_response'] or 'No final response recorded.'}", ""])
+        lines.extend([f"### {turn['request'] or 'Turn without recovered request'}", f"- Status: {turn['status']}", f"- Duration: {round(turn['duration_ms']/1000, 1)}s", f"- Actions: {turn['actions']}", f"- Files changed: {turn['files_changed']}", f"- Failures: {turn['failures']}", f"- Outcome: {turn['final_response'] or 'No final response recorded.'}", ""])
     lines.append("## Agent activity")
     lines.extend([
         f"- **{item['agent']}** — {item['events']} events, {item['actions']} actions, {item['failures']} failed, {round(item['measured_ms']/1000, 1)}s measured, {len(item['files'])} files"

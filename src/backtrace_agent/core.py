@@ -236,6 +236,92 @@ def suppress_content(run: Run, terms: Iterable[str]) -> Run:
     return result
 
 
+def slice_run(
+    run: Run,
+    *,
+    from_event: str | None = None,
+    to_event: str | None = None,
+    agents: Iterable[str] = (),
+) -> Run:
+    """Return an explicit, time-rebased subset without inventing full-run metrics."""
+    if not run.events:
+        raise ValueError("Cannot focus a run with no events.")
+
+    event_indexes = {event.id: index for index, event in enumerate(run.events)}
+    if from_event and from_event not in event_indexes:
+        raise ValueError(f"Unknown --from-event ID: {from_event}")
+    if to_event and to_event not in event_indexes:
+        raise ValueError(f"Unknown --to-event ID: {to_event}")
+    start_index = event_indexes[from_event] if from_event else 0
+    end_index = event_indexes[to_event] if to_event else len(run.events) - 1
+    if start_index > end_index:
+        raise ValueError("--from-event occurs after --to-event in the normalized timeline.")
+
+    requested_agents = list(dict.fromkeys(agent.strip() for agent in agents if agent.strip()))
+    available_agents = {agent.casefold(): agent for agent in run.agents}
+    unknown_agents = [agent for agent in requested_agents if agent.casefold() not in available_agents]
+    if unknown_agents:
+        raise ValueError(
+            f"Unknown --agent value(s): {', '.join(unknown_agents)}. "
+            f"Available agents: {', '.join(run.agents)}"
+        )
+    selected_agent_names = [available_agents[agent.casefold()] for agent in requested_agents]
+    selected_agent_keys = {agent.casefold() for agent in selected_agent_names}
+
+    range_events = run.events[start_index:end_index + 1]
+    selected_source_events = [
+        event for event in range_events
+        if not selected_agent_keys or event.agent.casefold() in selected_agent_keys
+    ]
+    if not selected_source_events:
+        raise ValueError("The requested event range and agent filters select no events.")
+
+    result = deepcopy(run)
+    result.events = deepcopy(selected_source_events)
+    selected_raw = json.dumps([event.raw for event in selected_source_events], ensure_ascii=False, default=str)
+    result.privacy_findings = scan_secrets(selected_raw)
+    offset_ms = result.events[0].at_ms
+    for event in result.events:
+        event.at_ms = max(0, event.at_ms - offset_ms)
+
+    source_turn_counts: dict[str, int] = {}
+    selected_turn_counts: dict[str, int] = {}
+    selected_turn_ids = {event.turn_id for event in result.events if event.turn_id}
+    for event in run.events:
+        if event.turn_id:
+            source_turn_counts[event.turn_id] = source_turn_counts.get(event.turn_id, 0) + 1
+    for event in result.events:
+        if event.turn_id:
+            selected_turn_counts[event.turn_id] = selected_turn_counts.get(event.turn_id, 0) + 1
+    result.turns = [deepcopy(turn) for turn in run.turns if turn.id in selected_turn_ids]
+    for turn in result.turns:
+        turn_events = [event for event in result.events if event.turn_id == turn.id]
+        turn.started_at_ms = min(event.at_ms for event in turn_events)
+        turn.completed_at_ms = max(event.at_ms + event.duration_ms for event in turn_events)
+        if selected_turn_counts.get(turn.id, 0) < source_turn_counts.get(turn.id, 0):
+            turn.status = "partial"
+            if not any(event.kind == "message" and event.metadata.get("phase") == "final" for event in turn_events):
+                turn.final_response = ""
+
+    had_token_counters = bool(result.tokens)
+    result.tokens = {}
+    result.metadata["scope"] = {
+        "active": True,
+        "from_event": range_events[0].id,
+        "to_event": range_events[-1].id,
+        "agents": selected_agent_names,
+        "source_event_count": len(run.events),
+        "selected_event_count": len(result.events),
+        "selected_first_event": selected_source_events[0].id,
+        "selected_last_event": selected_source_events[-1].id,
+        "original_start_ms": selected_source_events[0].at_ms,
+        "original_end_ms": max(event.at_ms + event.duration_ms for event in selected_source_events),
+        "timeline_rebased": True,
+        "cumulative_token_counters_removed": had_token_counters,
+    }
+    return result
+
+
 def _safe(value: Any, length: int = 6000) -> str:
     return _limit(redact_secrets(_stringify(value)), length)
 
@@ -618,8 +704,16 @@ def build_restart_brief(run: Run, checkpoint: int | str = -1) -> str:
     failures = [event for event in history if event.status == "error"][-5:]
     decisions = [event for event in history if event.kind in {"reasoning", "message"} and event.agent != "user"][-6:]
     files = list(dict.fromkeys(file for event in history for file in event.files))[-20:]
+    scope = run.metadata.get("scope") or {}
+    scope_notice = []
+    if scope.get("active"):
+        scope_notice = [
+            "## Scope warning",
+            f"This brief uses a focused slice containing {scope['selected_event_count']} of {scope['source_event_count']} normalized events. Events outside `{scope['from_event']}` through `{scope['to_event']}` are not represented.",
+            "",
+        ]
     lines = [
-        f"# Restart brief: {run.name}", "", "## Objective", run.goal or (turn.user_request if turn else "Continue the recorded agent task."), "",
+        f"# Restart brief: {run.name}", "", *scope_notice, "## Objective", run.goal or (turn.user_request if turn else "Continue the recorded agent task."), "",
         "## Current turn", (turn.user_request if turn and turn.user_request else "No user request was recovered for this turn."), "",
         "## Decisions and progress", *([f"- {event.title}: {event.detail}" for event in decisions] or ["- No explicit decision summaries were recorded."]), "",
         "## Completed actions", *([f"- [{event.agent}] {event.title}" + (f" — {event.detail}" if event.detail else "") for event in successful] or ["- No successful actions were recorded."]), "",
