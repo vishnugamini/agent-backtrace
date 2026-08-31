@@ -71,10 +71,67 @@ def build_fleet_notification(fleet: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def format_fleet_notification(payload: dict[str, Any], output_format: str = "generic") -> dict[str, Any]:
+    """Wrap the same aggregate evidence for generic, Slack, or Teams receivers."""
+    if output_format == "generic":
+        return payload
+    if output_format not in {"slack", "teams"}:
+        raise ValueError(f"Unknown webhook format: {output_format}")
+    result = payload["result"]
+    gate = payload["gate"]["summary"]
+    fleet = payload["fleet"]["summary"]
+    headline = f"Backtrace fleet gate {result}"
+    facts = [
+        ("Runs", fleet["runs"]),
+        ("Need attention", fleet["needs_attention"]),
+        ("Unresolved", fleet["unresolved_incidents"]),
+        ("Checks", f"{gate['passed']} passed · {gate['failed']} failed · {gate['skipped']} skipped"),
+        ("Event", payload["event_id"]),
+    ]
+    check_lines = [
+        f"{'SKIP' if check['skipped'] else 'PASS' if check['passed'] else 'FAIL'} · {check['key'].replace('_', ' ')} · actual {check['actual']} · expected {check['expected']}"
+        for check in payload["gate"]["checks"]
+    ]
+    if output_format == "slack":
+        return {
+            "text": f"{headline}: {gate['failed']} failed, {fleet['unresolved_incidents']} unresolved.",
+            "blocks": [
+                {"type": "header", "text": {"type": "plain_text", "text": headline, "emoji": True}},
+                {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*{label}*\n{value}"} for label, value in facts]},
+                {"type": "section", "text": {"type": "mrkdwn", "text": "*Gate evidence*\n" + "\n".join(check_lines)}},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Generated {payload['generated_at']} · aggregate evidence only"}]},
+            ],
+        }
+    return {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {"type": "TextBlock", "text": headline, "weight": "Bolder", "size": "Large", "color": "Good" if result == "passed" else "Attention"},
+                    {"type": "FactSet", "facts": [{"title": f"{label}:", "value": str(value)} for label, value in facts]},
+                    {"type": "TextBlock", "text": "Gate evidence", "weight": "Bolder", "separator": True},
+                    *[{"type": "TextBlock", "text": line, "wrap": True, "spacing": "Small"} for line in check_lines],
+                    {"type": "TextBlock", "text": f"Generated {payload['generated_at']} · aggregate evidence only", "isSubtle": True, "spacing": "Medium", "wrap": True},
+                ],
+            },
+        }],
+    }
+
+
+def serialize_webhook_payload(payload: dict[str, Any]) -> str:
+    """Return the exact deterministic JSON representation used for preview and delivery."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def deliver_webhook(
     payload: dict[str, Any],
     url: str,
     *,
+    event_id: str | None = None,
     signing_secret: str | None = None,
     timeout: float = 10.0,
     retries: int = 2,
@@ -83,12 +140,15 @@ def deliver_webhook(
 ) -> dict[str, Any]:
     """POST a fleet payload without redirects; retry only transient failures."""
     validate_webhook_url(url)
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    body = serialize_webhook_payload(payload).encode("utf-8")
+    event_id = event_id or payload.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        raise ValueError("Webhook delivery requires a stable event ID.")
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "agent-backtrace-webhook/1",
         "X-Backtrace-Event": "fleet.gate",
-        "Idempotency-Key": payload["event_id"],
+        "Idempotency-Key": event_id,
     }
     if signing_secret is not None:
         headers["X-Backtrace-Signature"] = "sha256=" + hmac.new(signing_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -100,7 +160,7 @@ def deliver_webhook(
             with opener.open(request, timeout=timeout) as response:
                 status_code = int(response.status)
             if 200 <= status_code < 300:
-                return {"configured": True, "status": "delivered", "attempts": index + 1, "status_code": status_code, "error": None, "event_id": payload["event_id"]}
+                return {"configured": True, "status": "delivered", "attempts": index + 1, "status_code": status_code, "error": None, "event_id": event_id}
             retryable = status_code >= 500
             error = f"Webhook returned HTTP {status_code}."
         except HTTPError as exc:
@@ -112,6 +172,6 @@ def deliver_webhook(
             retryable = True
             error = "Webhook connection failed or timed out."
         if not retryable or index >= retries:
-            return {"configured": True, "status": "failed", "attempts": index + 1, "status_code": status_code, "error": error, "event_id": payload["event_id"]}
+            return {"configured": True, "status": "failed", "attempts": index + 1, "status_code": status_code, "error": error, "event_id": event_id}
         sleep(backoff_seconds * (2 ** index))
     raise AssertionError("unreachable")

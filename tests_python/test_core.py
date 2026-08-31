@@ -15,7 +15,7 @@ from backtrace_agent.ci import render_fleet_junit_xml, render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
 from backtrace_agent.fleet import discover_traces, evaluate_fleet_gate, render_fleet_html, scan_traces, update_fleet_history
-from backtrace_agent.notify import build_fleet_notification, deliver_webhook, validate_webhook_url
+from backtrace_agent.notify import build_fleet_notification, deliver_webhook, format_fleet_notification, serialize_webhook_payload, validate_webhook_url
 from backtrace_agent.report import render_html
 
 
@@ -471,6 +471,19 @@ def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys,
     assert payload["event_id"].startswith("fleet-")
     for forbidden in ("secret-client", "secret-run", "private roadmap", str(root), "path", "objective", "model"):
         assert forbidden not in serialized
+    slack = format_fleet_notification(payload, "slack")
+    teams = format_fleet_notification(payload, "teams")
+    assert slack["text"].startswith("Backtrace fleet gate passed")
+    assert slack["blocks"][0]["type"] == "header"
+    assert slack["blocks"][2]["text"]["text"].startswith("*Gate evidence*")
+    assert teams["type"] == "message"
+    card = teams["attachments"][0]["content"]
+    assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
+    assert card["body"][0]["text"] == "Backtrace fleet gate passed"
+    for formatted in (slack, teams):
+        formatted_text = json.dumps(formatted)
+        for forbidden in ("secret-client", "secret-run", "private roadmap", str(root), "path", "objective", "model"):
+            assert forbidden not in formatted_text
 
     received = []
 
@@ -489,14 +502,15 @@ def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys,
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/fleet"
     try:
-        delivery = deliver_webhook(payload, url, signing_secret="test-secret", retries=1, backoff_seconds=0)
+        delivery = deliver_webhook(slack, url, event_id=payload["event_id"], signing_secret="test-secret", retries=1, backoff_seconds=0)
         assert delivery["status"] == "delivered"
         assert delivery["attempts"] == 2
         assert delivery["status_code"] == 204
         assert received[0][0]["Idempotency-Key"] == received[1][0]["Idempotency-Key"] == payload["event_id"]
         expected_signature = "sha256=" + hmac.new(b"test-secret", received[1][1], hashlib.sha256).hexdigest()
         assert received[1][0]["X-Backtrace-Signature"] == expected_signature
-        assert json.loads(received[1][1]) == payload
+        assert received[1][1].decode() == serialize_webhook_payload(slack)
+        assert json.loads(received[1][1]) == slack
 
         monkeypatch.setenv("BACKTRACE_TEST_WEBHOOK", url)
         monkeypatch.setenv("BACKTRACE_TEST_SECRET", "test-secret")
@@ -509,7 +523,7 @@ def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys,
         ]) == 0
         assert "Fleet webhook: DELIVERED" in capsys.readouterr().out
         report_text = report.read_text()
-        assert "Webhook delivered" in report_text
+        assert "webhook delivered" in report_text
         assert url not in report_text and "test-secret" not in report_text
 
         before_skip = len(received)
@@ -540,8 +554,22 @@ def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys,
         "--scan", str(root), "--max-fleet-needs-attention", "0",
         "--webhook-url-env", "BACKTRACE_TEST_WEBHOOK", "--notify-on", "always", "-o", str(failed_report),
     ]) == 2
-    assert "Fleet webhook: FAILED · 3 attempt(s) · HTTP 503" in capsys.readouterr().out
-    assert "Webhook delivery failed" in failed_report.read_text()
+    assert "Fleet webhook: FAILED · generic · 3 attempt(s) · HTTP 503" in capsys.readouterr().out
+    assert "webhook delivery failed" in failed_report.read_text()
+    preview = tmp_path / "slack-preview.json"
+    preview_report = tmp_path / "preview.html"
+    assert main([
+        "--scan", str(root), "--max-fleet-needs-attention", "0",
+        "--webhook-format", "slack", "--webhook-payload-output", str(preview), "-o", str(preview_report),
+    ]) == 0
+    assert "Fleet webhook: PREVIEWED · slack · 0 attempt(s) · payload written" in capsys.readouterr().out
+    preview_payload = json.loads(preview.read_text())
+    assert preview_payload["blocks"][0]["type"] == "header"
+    assert preview.read_text() == serialize_webhook_payload(preview_payload)
+    preview_html = preview_report.read_text()
+    assert "webhook previewed without a network request" in preview_html
+    assert '"format": "slack"' in preview_html and '"status": "previewed"' in preview_html
+    assert str(root) not in preview.read_text() and "private roadmap" not in preview.read_text()
     monkeypatch.delenv("MISSING_WEBHOOK", raising=False)
     assert main(["--scan", str(root), "--max-fleet-needs-attention", "0", "--webhook-url-env", "MISSING_WEBHOOK"]) == 2
     assert "MISSING_WEBHOOK is missing or empty" in capsys.readouterr().err

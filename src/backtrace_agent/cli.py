@@ -15,7 +15,7 @@ from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_fleet_junit_xml, render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
 from .fleet import evaluate_fleet_gate, scan_traces, update_fleet_history, write_fleet_report
-from .notify import build_fleet_notification, deliver_webhook, validate_webhook_url
+from .notify import build_fleet_notification, deliver_webhook, format_fleet_notification, serialize_webhook_payload, validate_webhook_url
 from .report import write_report
 
 
@@ -73,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notify-on", choices=("failure", "always"), default="failure", help="Send the fleet webhook on gate failure or every decision (default: failure)")
     parser.add_argument("--webhook-timeout", type=positive_float, default=10.0, metavar="SECONDS", help="Webhook request timeout (default: 10)")
     parser.add_argument("--webhook-retries", type=nonnegative_int, default=2, metavar="N", help="Transient webhook retries after the first attempt (default: 2)")
+    parser.add_argument("--webhook-format", choices=("generic", "slack", "teams"), default="generic", help="Exact outbound message shape (default: generic)")
+    parser.add_argument("--webhook-payload-output", type=Path, metavar="JSON", help="Write the exact privacy-safe request body without requiring a destination")
     parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
     parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
@@ -446,20 +448,28 @@ def _scan(args: argparse.Namespace) -> int:
         gate_spec = {key: getattr(args, key) for key in FLEET_INTEGER_GATE_KEYS}
         gate_spec["fail_on_fleet_regression"] = args.fail_on_fleet_regression
         fleet["quality_gate"] = evaluate_fleet_gate(fleet, gate_spec)
-        fleet["notification"] = {"configured": False, "status": "not_configured", "attempts": 0, "status_code": None, "error": None, "event_id": None}
-        if args.webhook_url_env:
+        fleet["notification"] = {"configured": False, "status": "not_configured", "format": args.webhook_format, "payload_written": False, "attempts": 0, "status_code": None, "error": None, "event_id": None}
+        if args.webhook_url_env or args.webhook_payload_output:
             payload = build_fleet_notification(fleet)
+            formatted_payload = format_fleet_notification(payload, args.webhook_format)
+            payload_written = bool(args.webhook_payload_output)
+            if args.webhook_payload_output:
+                _atomic_write_text(args.webhook_payload_output, serialize_webhook_payload(formatted_payload))
             should_send = args.notify_on == "always" or not fleet["quality_gate"]["passed"]
-            if should_send:
+            if not args.webhook_url_env:
+                fleet["notification"] = {"configured": True, "status": "previewed", "format": args.webhook_format, "payload_written": payload_written, "attempts": 0, "status_code": None, "error": None, "event_id": payload["event_id"]}
+            elif should_send:
                 fleet["notification"] = deliver_webhook(
-                    payload,
+                    formatted_payload,
                     args._webhook_url,
+                    event_id=payload["event_id"],
                     signing_secret=args._webhook_signing_secret,
                     timeout=args.webhook_timeout,
                     retries=args.webhook_retries,
                 )
+                fleet["notification"].update({"format": args.webhook_format, "payload_written": payload_written})
             else:
-                fleet["notification"] = {"configured": True, "status": "skipped", "attempts": 0, "status_code": None, "error": "Gate passed and --notify-on is failure.", "event_id": payload["event_id"]}
+                fleet["notification"] = {"configured": True, "status": "skipped", "format": args.webhook_format, "payload_written": payload_written, "attempts": 0, "status_code": None, "error": "Gate passed and --notify-on is failure.", "event_id": payload["event_id"]}
         report = write_fleet_report(fleet, args.output)
         if args.junit_output:
             _atomic_write_text(args.junit_output, render_fleet_junit_xml(fleet, fleet["quality_gate"]))
@@ -494,7 +504,8 @@ def _scan(args: argparse.Namespace) -> int:
         if fleet["notification"]["configured"]:
             notification = fleet["notification"]
             suffix = f" · HTTP {notification['status_code']}" if notification["status_code"] is not None else ""
-            print(f"Fleet webhook: {notification['status'].upper()} · {notification['attempts']} attempt(s){suffix}")
+            preview = " · payload written" if notification["payload_written"] else ""
+            print(f"Fleet webhook: {notification['status'].upper()} · {notification['format']} · {notification['attempts']} attempt(s){suffix}{preview}")
         for item in fleet["runs"][:10]:
             print(
                 f"- [{item['status'].upper()}] risk {item['risk_score']:>3} · {item['path']} "
@@ -522,13 +533,14 @@ def main(argv: list[str] | None = None) -> int:
     if (args.fail_on_fleet_regression or args.max_new_attention is not None) and not args.history:
         print("backtrace-agent: trend gate options require --history", file=sys.stderr)
         return 2
+    notification_requested = bool(args.webhook_url_env or args.webhook_payload_output)
+    if notification_requested and (not args.scan or not fleet_gate_requested):
+        print("backtrace-agent: webhook notification options require --scan and at least one fleet gate", file=sys.stderr)
+        return 2
     if args.webhook_signing_secret_env and not args.webhook_url_env:
         print("backtrace-agent: --webhook-signing-secret-env requires --webhook-url-env", file=sys.stderr)
         return 2
     if args.webhook_url_env:
-        if not args.scan or not fleet_gate_requested:
-            print("backtrace-agent: --webhook-url-env requires --scan and at least one fleet gate", file=sys.stderr)
-            return 2
         webhook_url = os.environ.get(args.webhook_url_env)
         if not webhook_url:
             print(f"backtrace-agent: environment variable {args.webhook_url_env} is missing or empty", file=sys.stderr)

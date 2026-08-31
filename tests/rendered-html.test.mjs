@@ -43,6 +43,8 @@ test("keeps trace import and restart behavior in the client source", async () =>
   assert.match(page, /Fleet gate: FAILED/);
   assert.match(page, /--webhook-url-env/);
   assert.match(page, /Fleet webhook: DELIVERED/);
+  assert.match(page, /--webhook-format slack/);
+  assert.match(page, /exact preview available/);
   assert.match(page, /navigator\.clipboard\.writeText/);
   assert.match(trace, /function parseTrace/);
   assert.match(trace, /function detectSignals/);

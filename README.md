@@ -101,11 +101,24 @@ backtrace-agent --scan ~/.codex/sessions \
   --max-fleet-unresolved 0 \
   --webhook-url-env BACKTRACE_WEBHOOK_URL \
   --webhook-signing-secret-env BACKTRACE_WEBHOOK_SECRET \
+  --webhook-format slack \
   --notify-on failure \
   -o session-fleet.html
 ```
 
 Webhook payloads contain only aggregate fleet counts, gate checks, trend deltas, timestamps, and a deterministic event ID—never paths, prompts, objectives, model names, run names, or raw events. Destinations must use HTTPS except for localhost testing, embedded URL credentials are rejected, and redirects are refused. Optional HMAC-SHA256 signatures use `X-Backtrace-Signature`; `Idempotency-Key` stays stable across retries. Transient connection and 5xx failures retry with bounded exponential backoff. Delivery, skip, and failure states appear in HTML and `--json`; exhausted delivery failures return exit code 2. History snapshots are already committed before notification is attempted.
+
+`--webhook-format generic` sends the complete machine-readable schema, `slack` produces Block Kit with fallback text, and `teams` produces a Microsoft Adaptive Card. Preview the exact outbound body without configuring a URL or making a network request:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --max-fleet-unresolved 0 \
+  --webhook-format teams \
+  --webhook-payload-output teams-preview.json \
+  -o session-fleet.html
+```
+
+Preview files use the same aggregate-only evidence as delivery. When both preview output and a destination are supplied, the file is byte-for-byte equivalent to the JSON object signed and posted after canonical serialization; the report records the selected format and whether the exact payload was written.
 
 Compare a new run with a known baseline:
 
@@ -389,7 +402,7 @@ app/ + lib/            Interactive demo
 
 - First-class Claude Code and OpenTelemetry adapters
 - User-defined signal and policy plugins
-- Slack and Teams presentation adapters for fleet notifications
+- Notification routing by gate type and severity
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.
