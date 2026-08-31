@@ -143,6 +143,57 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         f'<table><thead><tr><th>Provider type</th><th>Count</th><th>Interpretation</th></tr></thead><tbody>{unsupported_rows}</tbody></table></section></section>'
     )
     template = template.replace("</main>", ingestion_view + "</main>")
+    input_health = analysis["input_health"]
+    health_class = "good" if input_health["healthy"] else "warn"
+    template = template.replace(
+        "</nav>",
+        f'<button class="tab" data-view="health">Data health <span class="pill {health_class}">{input_health["issue_count"]} issues · {input_health["warning_count"]} notes</span></button></nav>',
+    )
+    if not input_health["healthy"]:
+        template = template.replace(
+            '</div></div><div class="header-actions">',
+            f'<span class="pill warn">SOURCE HEALTH · {input_health["issue_count"]} ISSUES</span></div></div><div class="header-actions">',
+            1,
+        )
+    health_cards = [
+        ("Parsed objects", input_health["parsed_object_records"]),
+        ("Malformed", input_health["malformed_records"]),
+        ("Non-object", input_health["non_object_records"]),
+        ("Duplicate IDs", input_health["duplicate_event_ids"]),
+        ("Time regressions", input_health["timestamp_regressions"]),
+        ("Encoding replacements", input_health["encoding_replacement_characters"]),
+    ]
+    health_card_html = "".join(
+        f'<article class="compare-metric {"changed" if label == "Time regressions" and value else "regressed" if label != "Parsed objects" and value else "same"}"><span>{html.escape(label)}</span><strong>{value}</strong></article>'
+        for label, value in health_cards
+    )
+    issue_rows = []
+    if input_health["malformed_records"]:
+        issue_rows.append(("Malformed JSON records", input_health["malformed_records"], "Lines " + ", ".join(str(value) for value in input_health["malformed_line_numbers"])))
+    if input_health["trailing_partial_record"]:
+        issue_rows.append(("Trailing partial record", 1, "The final line may still be in progress in an actively written trace."))
+    if input_health["non_object_records"]:
+        issue_rows.append(("Non-object JSON records", input_health["non_object_records"], "Scalar or array line values cannot become normalized events."))
+    if input_health["duplicate_event_ids"]:
+        issue_rows.append(("Duplicate event IDs", input_health["duplicate_event_ids"], ", ".join(input_health["duplicate_event_id_samples"])))
+    if input_health["timestamp_regressions"]:
+        issue_rows.append(("Timestamp ordering note", input_health["timestamp_regressions"], "Later completed records had earlier start times; this can be normal with concurrent work."))
+    if input_health["encoding_replacement_characters"]:
+        issue_rows.append(("Encoding replacements", input_health["encoding_replacement_characters"], "Invalid UTF-8 bytes were replaced while decoding the source."))
+    issue_table = "".join(
+        f'<tr><td>{html.escape(label)}</td><td>{count}</td><td>{html.escape(detail)}</td></tr>'
+        for label, count, detail in issue_rows
+    ) or '<tr><td colspan="3" class="empty">No structural source issues detected.</td></tr>'
+    health_scope = "This check covers the complete source, not only the selected event slice." if scope.get("active") else "This check covers the complete source."
+    health_view = (
+        '<section class="view" id="health"><section class="panel"><div class="kicker">TRACE DOCTOR · SOURCE-WIDE</div>'
+        f'<h2>{"Source structure looks healthy" if input_health["healthy"] else "Source integrity issues may weaken the report"}</h2>'
+        f'<p class="objective">{html.escape(health_scope)} Input format: <strong>{html.escape(input_health["format"])}</strong>; {input_health["total_lines"]} line(s), {input_health["blank_lines"]} blank.</p>'
+        f'<div class="comparison-grid">{health_card_html}</div></section>'
+        '<section class="panel" style="margin-top:18px"><div class="kicker">STRUCTURAL FINDINGS</div>'
+        f'<table><thead><tr><th>Finding</th><th>Count</th><th>Evidence</th></tr></thead><tbody>{issue_table}</tbody></table></section></section>'
+    )
+    template = template.replace("</main>", health_view + "</main>")
     token_stats = analysis["tokens"]
     if token_stats.get("total_tokens"):
         template = template.replace("</nav>", '<button class="tab" data-view="tokens">Tokens</button></nav>')

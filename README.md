@@ -14,6 +14,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 
 - Collapse Codex bookkeeping into meaningful user, reasoning, tool, file, and subagent events.
 - Audit parser coverage so new provider item types cannot disappear silently as trace schemas evolve.
+- Diagnose malformed or truncated JSONL, invalid record shapes, duplicate event IDs, encoding damage, and source-order timestamp regressions.
 - Reconstruct turns, commands, durations, exit codes, changed files, and reported outcomes.
 - Flag repeated actions, failed steps, recoveries, slow actions, and unexplained stalls.
 - Reconstruct the run into understandable workflow phases and show how the agent moved between them.
@@ -134,6 +135,15 @@ backtrace-agent run.jsonl --audit-ingestion --json > ingestion-audit.json
 
 The audit separates transport and bookkeeping records from completed semantic candidates, reports adapter coverage independently from event materialization, identifies supported items omitted because their content was empty, and names unknown completed-item types with counts. The HTML report adds a per-provider-type matrix showing completed, normalized, and omitted counts. Audit mode is source-wide and exits without writing report artifacts. This distinction matters: a low normalized-to-raw-record ratio is normal for verbose agent transports, while an unsupported semantic type may mean the parser needs an update.
 
+Check whether the source itself is structurally trustworthy:
+
+```bash
+backtrace-agent run.jsonl --doctor
+backtrace-agent run.jsonl --doctor --json > trace-health.json
+```
+
+Trace Doctor reports the detected container format, parsed objects, blank lines, malformed JSONL line numbers, a likely unfinished final line, non-object values, invalid UTF-8 replacements, duplicate normalized event IDs, and timestamps that move backward in source order. Timestamp reversals are ordering notes rather than integrity failures because concurrent work can complete out of start-time order. It never prints malformed source content. Doctor mode reads the complete source and does not write report artifacts; the same findings appear in every normal report under **Data health**.
+
 Enforce agent-run quality in CI:
 
 ```bash
@@ -145,6 +155,8 @@ backtrace-agent current.jsonl \
   --max-repetitions 0 \
   --max-stalls 1 \
   --max-unsupported-items 0 \
+  --max-malformed-records 0 \
+  --max-duplicate-event-ids 0 \
   --max-failure-rate 5 \
   --require-evidence \
   --fail-on-regression \
@@ -154,6 +166,8 @@ backtrace-agent current.jsonl \
 Configured checks are embedded in HTML, JSON, and Markdown with actual and expected values. The command exits `1` if any check fails and `0` when every check passes, making the result usable in GitHub Actions and other CI systems. `--fail-on-errors` remains a shorthand for `--max-failures 0`.
 
 `--max-unsupported-items 0` is the schema-drift guardrail: it makes CI fail when a provider introduces completed semantic items the installed parser does not understand.
+
+`--max-malformed-records 0` and `--max-duplicate-event-ids 0` prevent damaged or ambiguous source evidence from passing CI unnoticed. A partial final line can be normal while watching an actively written trace, so watch workflows may choose a nonzero malformed-record threshold.
 
 Keep those rules in version control instead of repeating flags:
 
@@ -210,16 +224,17 @@ backtrace-agent examples/demo.jsonl --json > normalized.json
 The generated HTML report is self-contained: no server, database, API key, CDN, or tracking script. Open it in any modern browser and:
 
 1. Start from the objective, turn outcomes, completion evidence, and run-level counts.
-2. Check **Ingestion** to confirm source-wide semantic coverage and expose provider schema drift.
-3. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
-4. Open **Incidents** to separate recovered failures from unresolved operations and inspect their recovery chains.
-5. Audit **Side effects** to see what the agent changed outside its own working memory.
-6. Use **Agent map** to see when each agent spoke, reasoned, used tools, changed files, handed off, or failed on a shared run clock.
-7. Filter and search the meaningful timeline by kind, status, or user turn.
-8. Inspect exact commands, sanitized output, duration, exit code, and related files.
-9. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
-10. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
-11. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
+2. Check **Data health** for malformed records, unfinished writes, duplicate IDs, encoding damage, and timestamp disorder.
+3. Check **Ingestion** to confirm source-wide semantic coverage and expose provider schema drift.
+4. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
+5. Open **Incidents** to separate recovered failures from unresolved operations and inspect their recovery chains.
+6. Audit **Side effects** to see what the agent changed outside its own working memory.
+7. Use **Agent map** to see when each agent spoke, reasoned, used tools, changed files, handed off, or failed on a shared run clock.
+8. Filter and search the meaningful timeline by kind, status, or user turn.
+9. Inspect exact commands, sanitized output, duration, exit code, and related files.
+10. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
+11. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
+12. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
 
 The map includes per-agent action, failure, measured-time, file, and top-operation summaries. Event marks remain clickable even on a dense run, opening the same checkpoint inspector and review actions used elsewhere in the report.
 

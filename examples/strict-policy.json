@@ -5,6 +5,8 @@
   "max_repetitions": 0,
   "max_stalls": 1,
   "max_unsupported_items": 0,
+  "max_malformed_records": 0,
+  "max_duplicate_event_ids": 0,
   "max_failure_rate": 5,
   "require_evidence": true
 }

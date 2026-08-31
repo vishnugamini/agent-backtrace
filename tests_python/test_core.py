@@ -187,6 +187,93 @@ def test_ingestion_audit_exposes_schema_drift_empty_items_cli_and_gate(tmp_path,
     assert "`PlanMutation` — 1 item(s)" in markdown
 
 
+def test_trace_doctor_reports_damage_truncation_duplicate_ids_order_and_gates(tmp_path, capsys):
+    source = codex_trace(tmp_path)
+    records = source.read_text(encoding="utf-8").splitlines()
+    duplicate_out_of_order = {
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "turn_id": "turn-1",
+            "started_at_ms": 1_999_000,
+            "completed_at_ms": 1_999_100,
+            "item": {
+                "type": "CommandExecution",
+                "id": "e-2003000",
+                "command": ["zsh", "-lc", "echo duplicate"],
+                "status": "completed",
+                "exit_code": 0,
+            },
+        },
+    }
+    damaged = tmp_path / "damaged.jsonl"
+    damaged.write_text("\n".join([*records[:4], "{broken", *records[4:], json.dumps(duplicate_out_of_order), '{"unfinished":']), encoding="utf-8")
+    run = parse_trace(damaged)
+    health = analyze_run(run)["input_health"]
+    assert health["format"] == "jsonl"
+    assert health["malformed_records"] == 2
+    assert health["malformed_line_numbers"] == [5, 14]
+    assert health["trailing_partial_record"] is True
+    assert health["duplicate_event_ids"] == 1
+    assert health["duplicate_event_id_samples"] == ["e-2003000"]
+    assert health["timestamp_regressions"] == 1
+    assert health["issue_count"] == 3
+    assert health["warning_count"] == 1
+    assert health["healthy"] is False
+
+    no_report = tmp_path / "doctor-must-not-write.html"
+    assert main([str(damaged), "--doctor", "-o", str(no_report)]) == 0
+    doctor_text = capsys.readouterr().out
+    assert "Trace doctor: ISSUES DETECTED" in doctor_text
+    assert "Malformed lines: 5, 14" in doctor_text
+    assert "Trailing partial record: yes" in doctor_text
+    assert "Duplicate ID samples: e-2003000" in doctor_text
+    assert not no_report.exists()
+    assert main([str(damaged), "--doctor", "--json"]) == 0
+    doctor_json = json.loads(capsys.readouterr().out)
+    assert doctor_json["issue_count"] == 3
+    assert doctor_json["warning_count"] == 1
+    assert doctor_json["trailing_partial_record"] is True
+    assert main([str(damaged), "--doctor", "--audit-ingestion"]) == 2
+    capsys.readouterr()
+
+    gate = evaluate_policy(run, {"max_malformed_records": 0, "max_duplicate_event_ids": 0})
+    assert gate["passed"] is False
+    assert {check["key"] for check in gate["checks"]} == {"max_malformed_records", "max_duplicate_event_ids"}
+    assert main([str(damaged), "--max-malformed-records", "0", "--max-duplicate-event-ids", "0", "-o", str(tmp_path / "doctor-gate.html")]) == 1
+    capsys.readouterr()
+    report = render_html(run, quality_gate=gate)
+    assert 'data-view="health"' in report
+    assert "TRACE DOCTOR · SOURCE-WIDE" in report
+    assert "SOURCE HEALTH · 3 ISSUES" in report
+    assert "e-2003000" in report
+    markdown = render_markdown_summary(run, quality_gate=gate)
+    assert "## Input health" in markdown
+    assert "Malformed source lines: 5, 14" in markdown
+
+    healthy = analyze_run(parse_trace(codex_trace(tmp_path)))["input_health"]
+    assert healthy["healthy"] is True
+    assert healthy["issue_count"] == 0
+    assert healthy["warning_count"] == 0
+
+    unreadable = tmp_path / "only-broken.jsonl"
+    unreadable.write_text('{"unfinished":', encoding="utf-8")
+    assert main([str(unreadable), "--doctor", "--json"]) == 0
+    unreadable_health = json.loads(capsys.readouterr().out)
+    assert unreadable_health["malformed_records"] == 1
+    assert unreadable_health["trailing_partial_record"] is True
+    assert unreadable_health["normalization_available"] is False
+    assert unreadable_health["healthy"] is False
+
+    encoding_damaged = tmp_path / "encoding-damaged.jsonl"
+    valid_record = json.dumps({"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "valid"}}).encode()
+    encoding_damaged.write_bytes(valid_record + b"\n\xff")
+    encoding_health = analyze_run(parse_trace(encoding_damaged))["input_health"]
+    assert encoding_health["encoding_replacement_characters"] == 1
+    assert encoding_health["malformed_records"] == 1
+    assert encoding_health["healthy"] is False
+
+
 def test_analysis_separates_changed_and_referenced_files(tmp_path):
     analysis = analyze_run(parse_trace(codex_trace(tmp_path)))
     assert analysis["counts"]["files_changed"] == 1

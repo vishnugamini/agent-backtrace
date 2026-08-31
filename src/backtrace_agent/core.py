@@ -346,20 +346,53 @@ def _parse_time(value: Any) -> float | None:
         return None
 
 
-def _read_records(raw: str) -> list[dict[str, Any]]:
+def _read_records(raw: str, *, encoding_replacement_characters: int = 0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    lines = raw.splitlines()
+    health: dict[str, Any] = {
+        "format": "unknown",
+        "total_lines": len(lines),
+        "blank_lines": sum(not line.strip() for line in lines),
+        "malformed_records": 0,
+        "malformed_line_numbers": [],
+        "trailing_partial_record": False,
+        "non_object_records": 0,
+        "encoding_replacement_characters": encoding_replacement_characters,
+    }
     try:
         parsed = json.loads(raw)
-        values = parsed if isinstance(parsed, list) else parsed.get("events", [parsed]) if isinstance(parsed, dict) else []
+        if isinstance(parsed, list):
+            values = parsed
+            health["format"] = "json-array"
+        elif isinstance(parsed, dict) and isinstance(parsed.get("events"), list):
+            values = parsed["events"]
+            health["format"] = "json-events-object"
+        elif isinstance(parsed, dict):
+            values = [parsed]
+            health["format"] = "json-object"
+        else:
+            values = [parsed]
+            health["format"] = "json-scalar"
     except json.JSONDecodeError:
         values = []
-        for line in raw.splitlines():
+        health["format"] = "jsonl"
+        nonempty_lines = [index for index, line in enumerate(lines, 1) if line.strip()]
+        last_nonempty_line = nonempty_lines[-1] if nonempty_lines else None
+        for line_number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
             try:
                 values.append(json.loads(line))
             except json.JSONDecodeError:
+                health["malformed_records"] += 1
+                if len(health["malformed_line_numbers"]) < 50:
+                    health["malformed_line_numbers"].append(line_number)
+                if line_number == last_nonempty_line and not raw.endswith(("\n", "\r")):
+                    health["trailing_partial_record"] = True
                 continue
-    return [value for value in values if isinstance(value, dict)]
+    health["non_object_records"] = sum(not isinstance(value, dict) for value in values)
+    records = [value for value in values if isinstance(value, dict)]
+    health["parsed_object_records"] = len(records)
+    return records, health
 
 
 def _content_text(content: Any) -> str:
@@ -698,8 +731,7 @@ def _parse_generic(records: list[dict[str, Any]], name: str, raw: str) -> Run:
     return Run(name, "Generic trace", events, privacy_findings=scan_secrets(raw), metadata={"record_count": len(records), "adapter": "generic", "ignored_record_count": 0, "ingestion": ingestion})
 
 
-def parse_trace(source: str | Path, *, name: str | None = None) -> Run:
-    """Parse Codex or loose JSON/JSONL into a compact, privacy-safe run model."""
+def _load_trace_source(source: str | Path) -> tuple[Path | None, bytes, str, int]:
     path: Path | None = None
     if isinstance(source, Path):
         path = source
@@ -708,13 +740,77 @@ def parse_trace(source: str | Path, *, name: str | None = None) -> Run:
         if candidate.exists():
             path = candidate
     source_bytes = path.read_bytes() if path else str(source).encode("utf-8")
-    raw = source_bytes.decode("utf-8", errors="replace")
-    records = _read_records(raw)
+    try:
+        raw = source_bytes.decode("utf-8")
+        encoding_replacements = 0
+    except UnicodeDecodeError:
+        raw = source_bytes.decode("utf-8", errors="replace")
+        encoding_replacements = raw.count("\ufffd")
+    return path, source_bytes, raw, encoding_replacements
+
+
+def inspect_source_health(source: str | Path) -> dict[str, Any]:
+    """Inspect source structure even when no usable event object can be parsed."""
+    path, source_bytes, raw, encoding_replacements = _load_trace_source(source)
+    _, health = _read_records(raw, encoding_replacement_characters=encoding_replacements)
+    health.update({
+        "duplicate_event_ids": 0,
+        "duplicate_event_id_samples": [],
+        "timestamp_regressions": 0,
+        "normalization_available": False,
+    })
+    health["issue_count"] = (
+        health["malformed_records"]
+        + health["non_object_records"]
+        + health["encoding_replacement_characters"]
+    )
+    health["warning_count"] = 0
+    health["healthy"] = health["issue_count"] == 0
+    health["source"] = str(path.resolve()) if path else "inline trace"
+    health["source_fingerprint"] = f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+    return health
+
+
+def parse_trace(source: str | Path, *, name: str | None = None) -> Run:
+    """Parse Codex or loose JSON/JSONL into a compact, privacy-safe run model."""
+    path, source_bytes, raw, encoding_replacements = _load_trace_source(source)
+    records, input_health = _read_records(raw, encoding_replacement_characters=encoding_replacements)
     if not records:
         raise ValueError("No readable JSON or JSONL event objects were found.")
     run_name = name or (path.stem if path else "imported-trace")
     is_codex = any(record.get("type") == "event_msg" and isinstance(record.get("payload"), dict) and record["payload"].get("type") == "item_completed" for record in records)
+    source_timestamps: list[float] = []
+    for record in records:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if is_codex and not (record.get("type") == "event_msg" and payload.get("type") == "item_completed"):
+            continue
+        timestamp = _parse_time(
+            payload.get("started_at_ms")
+            or record.get("timestamp")
+            or record.get("created_at")
+            or record.get("time")
+            or record.get("ts")
+        )
+        if timestamp is not None:
+            source_timestamps.append(timestamp)
     run = _parse_codex(records, run_name, raw) if is_codex else _parse_generic(records, run_name, raw)
+    duplicate_ids = [event_id for event_id, count in Counter(event.id for event in run.events).items() if count > 1]
+    timestamp_regressions = sum(current < previous for previous, current in zip(source_timestamps, source_timestamps[1:]))
+    input_health.update({
+        "duplicate_event_ids": len(duplicate_ids),
+        "duplicate_event_id_samples": [redact_secrets(value) for value in duplicate_ids[:20]],
+        "timestamp_regressions": timestamp_regressions,
+        "normalization_available": True,
+    })
+    input_health["issue_count"] = (
+        input_health["malformed_records"]
+        + input_health["non_object_records"]
+        + input_health["encoding_replacement_characters"]
+        + input_health["duplicate_event_ids"]
+    )
+    input_health["warning_count"] = input_health["timestamp_regressions"]
+    input_health["healthy"] = input_health["issue_count"] == 0
+    run.metadata["input_health"] = input_health
     run.metadata["source_fingerprint"] = f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
     run.metadata["source_bytes"] = len(source_bytes)
     return run

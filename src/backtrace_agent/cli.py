@@ -13,11 +13,11 @@ from pathlib import Path
 from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
-from .core import build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
+from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
 from .report import write_report
 
 
-INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructive_actions", "max_repetitions", "max_stalls", "max_total_tokens", "max_unsupported_items"}
+INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructive_actions", "max_repetitions", "max_stalls", "max_total_tokens", "max_unsupported_items", "max_malformed_records", "max_duplicate_event_ids"}
 NUMBER_POLICY_KEYS = {"max_failure_rate", "max_tokens_per_action", "min_cache_ratio"}
 BOOLEAN_POLICY_KEYS = {"require_evidence", "fail_on_regression"}
 POLICY_KEYS = INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS | BOOLEAN_POLICY_KEYS
@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-status", choices=("all", "ok", "error", "warning"), default="all", help="Filter --find by event status (default: all)")
     parser.add_argument("--find-limit", type=positive_int, default=20, metavar="N", help="Maximum --find results to return (default: 20)")
     parser.add_argument("--audit-ingestion", action="store_true", help="Inspect parser coverage and unsupported provider item types without writing a report")
+    parser.add_argument("--doctor", action="store_true", help="Inspect source integrity, malformed records, duplicate IDs, and timestamp order without writing a report")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -89,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-repetitions", type=nonnegative_int, metavar="N", help="Fail the quality gate when repeated-action signals exceed N")
     parser.add_argument("--max-stalls", type=nonnegative_int, metavar="N", help="Fail the quality gate when within-turn stalls exceed N")
     parser.add_argument("--max-unsupported-items", type=nonnegative_int, metavar="N", help="Fail when more than N completed semantic items use unsupported provider types")
+    parser.add_argument("--max-malformed-records", type=nonnegative_int, metavar="N", help="Fail when more than N source records cannot be decoded as JSON")
+    parser.add_argument("--max-duplicate-event-ids", type=nonnegative_int, metavar="N", help="Fail when more than N normalized event IDs are duplicated")
     parser.add_argument("--max-failure-rate", type=nonnegative_float, metavar="PERCENT", help="Fail when failed actions exceed this percentage of actions")
     parser.add_argument("--require-evidence", action="store_true", help="Require at least one successful test, build, package, push, or deployment proof")
     parser.add_argument("--fail-on-regression", action="store_true", help="Fail when --compare produces a regressed verdict")
@@ -135,6 +138,8 @@ def build_policy_spec(args: argparse.Namespace) -> dict:
         "max_repetitions": args.max_repetitions,
         "max_stalls": args.max_stalls,
         "max_unsupported_items": args.max_unsupported_items,
+        "max_malformed_records": args.max_malformed_records,
+        "max_duplicate_event_ids": args.max_duplicate_event_ids,
         "max_failure_rate": args.max_failure_rate,
         "max_total_tokens": args.max_total_tokens,
         "max_tokens_per_action": args.max_tokens_per_action,
@@ -377,6 +382,45 @@ def _audit_ingestion(args: argparse.Namespace, trace: Path) -> int:
     return 0
 
 
+def _doctor(args: argparse.Namespace, trace: Path) -> int:
+    try:
+        run = parse_trace(trace)
+        if args.suppress:
+            run = suppress_content(run, args.suppress)
+        health = analyze_run(run)["input_health"]
+    except ValueError:
+        try:
+            health = inspect_source_health(trace)
+        except OSError as exc:
+            print(f"backtrace-agent: {exc}", file=sys.stderr)
+            return 2
+    except OSError as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    result = {"source": str(trace.resolve()), **health}
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    print(f"Trace doctor: {'HEALTHY' if health['healthy'] else 'ISSUES DETECTED'} · {health['format']}")
+    print(f"Source: {trace.resolve()}")
+    print(f"Parsed objects: {health['parsed_object_records']} · lines: {health['total_lines']} · blank: {health['blank_lines']}")
+    print(
+        f"Malformed: {health['malformed_records']} · non-object: {health['non_object_records']} "
+        f"· encoding replacements: {health['encoding_replacement_characters']}"
+    )
+    if health["normalization_available"]:
+        print(f"Duplicate event IDs: {health['duplicate_event_ids']} · timestamp regressions: {health['timestamp_regressions']}")
+    else:
+        print("Normalized ID and timestamp checks: unavailable because no event object could be parsed")
+    if health["malformed_line_numbers"]:
+        print("Malformed lines: " + ", ".join(str(value) for value in health["malformed_line_numbers"]))
+    if health["trailing_partial_record"]:
+        print("Trailing partial record: yes (the active writer may not have finished the final line)")
+    if health["duplicate_event_id_samples"]:
+        print("Duplicate ID samples: " + ", ".join(health["duplicate_event_id_samples"]))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify_source and not args.verify_bundle:
@@ -404,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         print("backtrace-agent: --incident-status requires --list-incidents", file=sys.stderr)
         return 2
     if args.list_incidents:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.find or args.audit_ingestion or args.event_kind or args.event_status != "all"
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.find or args.audit_ingestion or args.doctor or args.event_kind or args.event_status != "all"
         if conflicting:
             print("backtrace-agent: --list-incidents cannot be combined with watch, comparison, or focused-output options", file=sys.stderr)
             return 2
@@ -413,17 +457,23 @@ def main(argv: list[str] | None = None) -> int:
         print("backtrace-agent: --event-kind and --event-status require --find", file=sys.stderr)
         return 2
     if args.find:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.audit_ingestion
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.audit_ingestion or args.doctor
         if conflicting:
             print("backtrace-agent: --find cannot be combined with watch, comparison, incident catalog, or focused-output options", file=sys.stderr)
             return 2
         return _find_events(args, trace)
     if args.audit_ingestion:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.find or args.event_kind or args.event_status != "all"
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.find or args.doctor or args.event_kind or args.event_status != "all"
         if conflicting:
             print("backtrace-agent: --audit-ingestion cannot be combined with watch, comparison, search, incident, or focused-output options", file=sys.stderr)
             return 2
         return _audit_ingestion(args, trace)
+    if args.doctor:
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.find or args.audit_ingestion or args.event_kind or args.event_status != "all"
+        if conflicting:
+            print("backtrace-agent: --doctor cannot be combined with watch, comparison, search, ingestion audit, incident, or focused-output options", file=sys.stderr)
+            return 2
+        return _doctor(args, trace)
     return _watch(args, trace) if args.watch else _process_once(args, trace)
 
 

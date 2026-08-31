@@ -94,6 +94,24 @@ def analyze_run(run: Run) -> dict[str, Any]:
         "omitted_supported_item_types": [],
         "item_type_coverage": [],
     }
+    input_health = run.metadata.get("input_health") or {
+        "format": "in-memory",
+        "total_lines": len(run.events),
+        "blank_lines": 0,
+        "malformed_records": 0,
+        "malformed_line_numbers": [],
+        "trailing_partial_record": False,
+        "non_object_records": 0,
+        "encoding_replacement_characters": 0,
+        "parsed_object_records": len(run.events),
+        "duplicate_event_ids": 0,
+        "duplicate_event_id_samples": [],
+        "timestamp_regressions": 0,
+        "normalization_available": True,
+        "issue_count": 0,
+        "warning_count": 0,
+        "healthy": True,
+    }
     signals = detect_signals(run.events)
     tool_events = [event for event in run.events if event.kind in {"tool", "error"} and event.operation]
     file_events = [event for event in run.events if event.kind == "file"]
@@ -318,6 +336,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
         },
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
         "ingestion": ingestion,
+        "input_health": input_health,
         "privacy": {
             "redactions": run.privacy_findings,
             "secret_findings": sum(value for key, value in run.privacy_findings.items() if key != "custom_suppression"),
@@ -665,6 +684,14 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
         limit = int(policy["max_unsupported_items"])
         actual = analysis["ingestion"]["unsupported_completed_items"]
         add("max_unsupported_items", "Unsupported completed items", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} completed semantic item(s) whose provider type is not supported by this parser.")
+    if policy.get("max_malformed_records") is not None:
+        limit = int(policy["max_malformed_records"])
+        actual = analysis["input_health"]["malformed_records"]
+        add("max_malformed_records", "Malformed source records", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} source line(s) that could not be decoded as JSON records.")
+    if policy.get("max_duplicate_event_ids") is not None:
+        limit = int(policy["max_duplicate_event_ids"])
+        actual = analysis["input_health"]["duplicate_event_ids"]
+        add("max_duplicate_event_ids", "Duplicate normalized event IDs", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} duplicated normalized event ID(s).")
     if policy.get("max_failure_rate") is not None:
         limit = float(policy["max_failure_rate"])
         add("max_failure_rate", "Failure rate", round(failure_rate, 2), f"≤ {limit:g}%", failure_rate <= limit, f"{counts['failures']} failures across {counts['actions']} actions.")
@@ -765,6 +792,18 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
             f"- `{item['type']}` — {item['count']} item(s)"
             for item in ingestion["omitted_supported_item_types"]
         ])
+    input_health = analysis["input_health"]
+    lines.extend([
+        "", "## Input health",
+        f"Status: **{'healthy' if input_health['healthy'] else 'issues detected'}**. Format: **{input_health['format']}**; parsed object records: **{input_health['parsed_object_records']}**.",
+        f"Integrity issues: **{input_health['issue_count']}**. Ordering notes: **{input_health['warning_count']}**. Malformed records: **{input_health['malformed_records']}**. Non-object records: **{input_health['non_object_records']}**. Duplicate event IDs: **{input_health['duplicate_event_ids']}**. Timestamp regressions: **{input_health['timestamp_regressions']}**. Encoding replacements: **{input_health['encoding_replacement_characters']}**.",
+    ])
+    if input_health["malformed_line_numbers"]:
+        lines.append("- Malformed source lines: " + ", ".join(str(value) for value in input_health["malformed_line_numbers"]))
+    if input_health["trailing_partial_record"]:
+        lines.append("- The final non-empty line appears truncated; this is common while an active JSONL trace is still being written.")
+    if input_health["duplicate_event_id_samples"]:
+        lines.append("- Duplicate event ID samples: " + ", ".join(f"`{value}`" for value in input_health["duplicate_event_id_samples"]))
     incidents = analysis["incidents"]
     lines.extend(["", "## Failure incidents", f"Recovered: **{incidents['recovered']}**. Unresolved: **{incidents['unresolved']}**."])
     lines.extend([
