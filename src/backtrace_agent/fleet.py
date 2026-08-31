@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 from .analysis import analyze_run
-from .core import build_restart_brief, parse_trace, suppress_content
+from .core import build_restart_brief, parse_trace, redact_secrets, suppress_content
 from .report import write_report
 
 
@@ -67,6 +67,78 @@ def _atomic_write_text(destination: Path, content: str) -> None:
         os.replace(temporary, destination)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def load_triage_ledger(path: str | Path) -> dict[str, Any]:
+    path = Path(path).expanduser()
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read triage ledger {path}: {exc}") from exc
+    if not isinstance(ledger, dict) or set(ledger) != {"schema_version", "incidents"}:
+        raise ValueError("Triage ledger must contain exactly schema_version and incidents.")
+    if ledger["schema_version"] != 1 or isinstance(ledger["schema_version"], bool):
+        raise ValueError("Triage ledger schema_version must be 1.")
+    if not isinstance(ledger["incidents"], list):
+        raise ValueError("Triage ledger incidents must be an array.")
+    allowed_keys = {"incident_id", "event_id", "state", "note", "updated_at"}
+    seen: set[str] = set()
+    for index, item in enumerate(ledger["incidents"]):
+        if not isinstance(item, dict) or set(item) != allowed_keys:
+            raise ValueError(f"Triage ledger incident {index + 1} has missing or unknown fields.")
+        if any(not isinstance(item[key], str) for key in allowed_keys):
+            raise ValueError(f"Triage ledger incident {index + 1} fields must be strings.")
+        if not item["incident_id"] or len(item["incident_id"]) > 512 or not item["event_id"] or len(item["event_id"]) > 512:
+            raise ValueError(f"Triage ledger incident {index + 1} IDs must be 1 to 512 characters.")
+        if item["state"] not in {"open", "reviewed"}:
+            raise ValueError(f"Triage ledger incident {index + 1} state must be open or reviewed.")
+        if len(item["note"]) > 2000:
+            raise ValueError(f"Triage ledger incident {index + 1} note exceeds 2000 characters.")
+        try:
+            updated_at = datetime.fromisoformat(item["updated_at"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"Triage ledger incident {index + 1} updated_at must be an ISO-8601 timestamp.") from exc
+        if updated_at.tzinfo is None:
+            raise ValueError(f"Triage ledger incident {index + 1} updated_at must include a timezone.")
+        if item["incident_id"] in seen:
+            raise ValueError(f"Triage ledger contains duplicate incident_id {item['incident_id']}.")
+        seen.add(item["incident_id"])
+    return ledger
+
+
+def apply_triage_ledger(
+    fleet: dict[str, Any],
+    ledger: dict[str, Any],
+    *,
+    source_name: str,
+    suppress: Iterable[str] = (),
+) -> dict[str, Any]:
+    entries = {item["incident_id"]: item for item in ledger["incidents"]}
+    terms = list(dict.fromkeys(term.strip() for term in suppress if term.strip()))
+    matched = 0
+    reviewed = 0
+    for incident in fleet.get("incident_queue", []):
+        entry = entries.get(incident["id"])
+        if entry and entry["event_id"] == incident["event_id"]:
+            matched += 1
+            incident["triage_state"] = entry["state"]
+            incident["triage_note"] = redact_secrets(_display_value(entry["note"], terms))
+            incident["triage_updated_at"] = entry["updated_at"]
+        else:
+            incident["triage_state"] = "open"
+            incident["triage_note"] = ""
+            incident["triage_updated_at"] = "1970-01-01T00:00:00Z"
+        reviewed += incident["triage_state"] == "reviewed"
+    result = {
+        "configured": True,
+        "source": redact_secrets(_display_value(source_name, terms)),
+        "entries": len(ledger["incidents"]),
+        "matched_entries": matched,
+        "reviewed_incidents": reviewed,
+        "open_incidents": len(fleet.get("incident_queue", [])) - reviewed,
+    }
+    fleet["triage"] = result
+    return result
 
 
 def scan_traces(
@@ -522,9 +594,9 @@ const time=v=>new Date(v).toLocaleString(),duration=ms=>ms>=60000?`${(ms/60000).
     gate_css = '.fleet-gate{margin:0 0 28px;padding:20px;border:1px solid #9ab8a7;border-left:6px solid var(--green);background:#eef5ef}.fleet-gate.fail{border-color:#d39b8f;border-left-color:var(--red);background:#fbefec}.gate-head{display:flex;justify-content:space-between;gap:18px;align-items:start}.gate-head h2{font:27px Georgia,serif;margin:4px 0}.gate-result{font:800 12px monospace;border:1px solid currentColor;border-radius:999px;padding:7px 10px;color:var(--green)}.fleet-gate.fail .gate-result{color:var(--red)}.gate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}.gate-check{padding:12px;background:var(--surface);border:1px solid var(--line)}.gate-check.fail{border-color:#d39b8f}.gate-check.skip{border-style:dashed}.gate-check strong,.gate-check span,.gate-check small{display:block}.gate-check span{font:9px monospace;color:var(--muted);margin-top:5px}.gate-check small{margin-top:5px;color:#52605a}.delivery{margin:14px 0 0;padding:9px 11px;background:#fffdf799;border-left:3px solid var(--blue);font:11px monospace}.delivery.failed{border-left-color:var(--red)}.delivery.skipped{border-left-color:var(--amber)}.investigation-pack{margin:0 0 28px;padding:20px;border:1px solid #9cb6c9;border-left:6px solid var(--blue);background:#eef4f8;display:flex;align-items:center;justify-content:space-between;gap:20px}.investigation-pack[hidden]{display:none}.investigation-pack h2{font:27px Georgia,serif;margin:4px 0}.investigation-pack p{margin:4px 0;color:#52616b}.investigation-pack .button{text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center}'
     gate_html = '<section class="fleet-gate" id="fleet-gate" hidden><div class="gate-head"><div><div class="kicker">AUTOMATION DECISION</div><h2 id="gate-title"></h2><p id="gate-summary"></p></div><span class="gate-result" id="gate-result"></span></div><div class="gate-grid" id="gate-checks"></div><p class="delivery" id="notification-status" hidden></p></section><section class="investigation-pack" id="investigation-pack" hidden><div><div class="kicker">LINKED INVESTIGATION PACK</div><h2>Open the run, not another command</h2><p id="investigation-summary"></p></div><a class="button secondary" id="manifest-link" target="_blank" rel="noopener">Open manifest</a></section>'
     gate_js = '''const G=F.quality_gate,N=F.notification;if(G?.configured){const gate=$('#fleet-gate');gate.hidden=false;gate.classList.toggle('fail',!G.passed);$('#gate-title').textContent=G.passed?'Fleet gate passed':'Fleet gate failed';$('#gate-result').textContent=G.passed?'PASS':'FAIL';const provenance=G.policy_source?` Policy ${G.policy_source}.`:'';$('#gate-summary').textContent=`${G.summary.passed} passed · ${G.summary.failed} failed · ${G.summary.skipped} skipped.${provenance} Failed configured checks return exit code 1.`;$('#gate-checks').innerHTML=G.checks.map(c=>`<article class="gate-check ${c.skipped?'skip':c.passed?'':'fail'}"><strong>${esc(c.label)}</strong><span>Actual ${esc(c.actual)} · expected ${esc(c.expected)}</span><small>${esc(c.detail)}</small></article>`).join('');if(N?.configured){const delivery=$('#notification-status'),written=N.payload_written?' · exact payload written':'';delivery.hidden=false;delivery.classList.add(N.status);delivery.textContent=N.status==='delivered'?`${N.format} webhook delivered in ${N.attempts} attempt(s) · HTTP ${N.status_code} · ${N.event_id}${written}`:N.status==='skipped'?`${N.format} webhook skipped · ${N.error}${written}`:N.status==='previewed'?`${N.format} webhook previewed without a network request · ${N.event_id}${written}`:`${N.format} webhook delivery failed after ${N.attempts} attempt(s) · ${N.error}${written}`}}if(F.investigation?.configured){$('#investigation-pack').hidden=false;$('#investigation-summary').textContent=`${F.investigation.reports_written} full report(s) generated for ${F.investigation.scope==='all'?'all readable runs':'runs needing attention'}. Select a linked run below or inspect the privacy-minimized manifest.`;$('#manifest-link').href=F.investigation.manifest;}'''
-    gate_css += '.incident-queue{margin:0 0 28px;padding:20px;border:1px solid #d5b48b;border-left:6px solid var(--amber);background:#fbf3e6}.incident-queue[hidden]{display:none}.incident-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.incident-head h2{font:27px Georgia,serif;margin:4px 0}.incident-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.fleet-incident{background:var(--surface);border:1px solid var(--line);padding:13px}.fleet-incident:hover{border-color:var(--amber);transform:translateY(-1px)}.fleet-incident strong,.fleet-incident span,.fleet-incident small{display:block}.fleet-incident span{font:9px monospace;color:var(--muted);margin:5px 0}.fleet-incident small{color:#52605a}.incident-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.incident-action{font:800 9px monospace;color:var(--green);letter-spacing:.04em;text-decoration:none;border:1px solid #9ab8a7;padding:6px 8px;border-radius:3px}.incident-action.primary{background:var(--green);color:white;border-color:var(--green)}'
-    gate_html += '<section class="incident-queue" id="incident-queue" hidden><div class="incident-head"><div><div class="kicker">UNRESOLVED INCIDENT QUEUE</div><h2>Jump to the exact failure</h2><p>Ranked by run risk, failed attempts, and work performed afterward.</p></div><span class="pill warn" id="incident-count"></span></div><div class="incident-list" id="incident-list"></div></section>'
-    gate_js += '''if(F.incident_queue?.length){$('#incident-queue').hidden=false;$('#incident-count').textContent=`${F.incident_queue.length} unresolved`;$('#incident-list').innerHTML=F.incident_queue.map(i=>{const run=F.runs.find(r=>r.id===i.run_id);return `<article class="fleet-incident"><strong>${esc(i.operation)}</strong><span>${esc(run?.name||i.run_id)} · risk ${i.risk_score} · ${i.failed_attempts} failed attempt(s) · ${i.intervening_actions} later action(s)</span><small>${esc(i.detail||'No failure detail recovered.')}</small><div class="incident-actions"><a class="incident-action primary" href="${esc(i.report)}" target="_blank" rel="noopener">OPEN EXACT FAILURE →</a><a class="incident-action" href="${esc(i.brief)}" target="_blank" rel="noopener">OPEN RESTART BRIEF →</a></div></article>`}).join('');}'''
+    gate_css += '.incident-queue{margin:0 0 28px;padding:20px;border:1px solid #d5b48b;border-left:6px solid var(--amber);background:#fbf3e6}.incident-queue[hidden]{display:none}.incident-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.incident-head h2{font:27px Georgia,serif;margin:4px 0}.triage-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:14px}.triage-toolbar select,.triage-button{border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:7px 9px;border-radius:4px;font:700 10px monospace}.triage-button{cursor:pointer}.triage-status{font:10px monospace;color:var(--muted)}.incident-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.fleet-incident{background:var(--surface);border:1px solid var(--line);padding:13px}.fleet-incident.reviewed{opacity:.72;border-style:dashed}.fleet-incident:hover{border-color:var(--amber);transform:translateY(-1px)}.fleet-incident strong,.fleet-incident span,.fleet-incident small{display:block}.fleet-incident span{font:9px monospace;color:var(--muted);margin:5px 0}.fleet-incident small{color:#52605a}.triage-note{width:100%;min-height:62px;margin-top:10px;padding:8px;border:1px solid var(--line);background:#faf8f1;color:var(--ink);resize:vertical;font:12px/1.4 monospace}.incident-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.incident-action{font:800 9px monospace;color:var(--green);letter-spacing:.04em;text-decoration:none;border:1px solid #9ab8a7;padding:6px 8px;border-radius:3px;background:transparent;cursor:pointer}.incident-action.primary{background:var(--green);color:white;border-color:var(--green)}'
+    gate_html += '<section class="incident-queue" id="incident-queue" hidden><div class="incident-head"><div><div class="kicker">UNRESOLVED INCIDENT QUEUE</div><h2>Jump to the exact failure</h2><p>Ranked by run risk, failed attempts, and work performed afterward. Human review is tracked separately from source-evidenced recovery.</p></div><span class="pill warn" id="incident-count"></span></div><div class="triage-toolbar"><select id="triage-filter" aria-label="Filter incident review state"><option value="open">Needs review</option><option value="reviewed">Reviewed</option><option value="all">All incidents</option></select><button class="triage-button" id="export-triage" type="button">Download ledger</button><label class="triage-button" for="import-triage">Import ledger</label><input id="import-triage" type="file" accept="application/json,.json" hidden><span class="triage-status" id="triage-status"></span></div><div class="incident-list" id="incident-list"></div></section>'
+    gate_js += r'''if(F.incident_queue?.length){$('#incident-queue').hidden=false;const triageKey=`backtrace-triage:${F.root}`,validEntry=e=>e&&typeof e.incident_id==='string'&&typeof e.event_id==='string'&&(e.state==='open'||e.state==='reviewed')&&typeof e.note==='string'&&e.note.length<=2000&&typeof e.updated_at==='string'&&!Number.isNaN(Date.parse(e.updated_at))&&/(?:Z|[+-]\d\d:\d\d)$/.test(e.updated_at),seed=Object.fromEntries(F.incident_queue.map(i=>[i.id,{incident_id:i.id,event_id:i.event_id,state:i.triage_state||'open',note:i.triage_note||'',updated_at:i.triage_updated_at||'1970-01-01T00:00:00Z'}]));let triageState={...seed};try{const local=JSON.parse(localStorage.getItem(triageKey)||'null');if(local?.schema_version===1&&Array.isArray(local.incidents))for(const e of local.incidents){const current=seed[e.incident_id];if(validEntry(e)&&current&&current.event_id===e.event_id&&Date.parse(e.updated_at)>Date.parse(current.updated_at))triageState[e.incident_id]=e}}catch{}const entries=()=>F.incident_queue.map(i=>triageState[i.id]||seed[i.id]),persist=()=>{try{localStorage.setItem(triageKey,JSON.stringify({schema_version:1,incidents:entries()}))}catch{}},renderTriage=()=>{const filter=$('#triage-filter').value,reviewed=entries().filter(e=>e.state==='reviewed').length,visible=F.incident_queue.filter(i=>filter==='all'||triageState[i.id].state===filter);$('#incident-count').textContent=`${F.incident_queue.length-reviewed} open · ${reviewed} reviewed`;$('#triage-status').textContent=`${visible.length}/${F.incident_queue.length} shown${F.triage?.configured?` · seeded from ${F.triage.source}`:''}`;$('#incident-list').innerHTML=visible.length?visible.map(i=>{const run=F.runs.find(r=>r.id===i.run_id),state=triageState[i.id];return `<article class="fleet-incident ${state.state==='reviewed'?'reviewed':''}"><strong>${esc(i.operation)}</strong><span>${esc(run?.name||i.run_id)} · risk ${i.risk_score} · ${i.failed_attempts} failed attempt(s) · ${i.intervening_actions} later action(s)</span><small>${esc(i.detail||'No failure detail recovered.')}</small><textarea class="triage-note" data-triage-note="${esc(i.id)}" maxlength="2000" placeholder="Add a private review note…">${esc(state.note)}</textarea><div class="incident-actions"><a class="incident-action primary" href="${esc(i.report)}" target="_blank" rel="noopener">OPEN EXACT FAILURE →</a><a class="incident-action" href="${esc(i.brief)}" target="_blank" rel="noopener">OPEN RESTART BRIEF →</a><button class="incident-action" type="button" data-triage-review="${esc(i.id)}">${state.state==='reviewed'?'MARK NEEDS REVIEW':'MARK REVIEWED'}</button></div></article>`}).join(''):'<p class="empty">No incidents match this review filter.</p>';document.querySelectorAll('[data-triage-review]').forEach(button=>button.onclick=()=>{const id=button.dataset.triageReview,current=triageState[id];triageState[id]={...current,state:current.state==='reviewed'?'open':'reviewed',updated_at:new Date().toISOString()};persist();renderTriage()});document.querySelectorAll('[data-triage-note]').forEach(field=>field.onchange=()=>{const id=field.dataset.triageNote;triageState[id]={...triageState[id],note:field.value,updated_at:new Date().toISOString()};persist();renderTriage()})};$('#triage-filter').onchange=renderTriage;$('#export-triage').onclick=()=>{const blob=new Blob([JSON.stringify({schema_version:1,incidents:entries()},null,2)+'\n'],{type:'application/json'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='backtrace-triage.json';link.click();URL.revokeObjectURL(url)};$('#import-triage').onchange=async event=>{const file=event.target.files?.[0];if(!file)return;let matched=0;try{const imported=JSON.parse(await file.text());if(imported?.schema_version!==1||!Array.isArray(imported.incidents))throw new Error('schema');for(const e of imported.incidents){const current=seed[e.incident_id];if(!validEntry(e)||!current||current.event_id!==e.event_id)continue;triageState[e.incident_id]=e;matched++}persist();renderTriage();$('#triage-status').textContent=`${matched} imported from ${file.name}`}catch{$('#triage-status').textContent='Import rejected: invalid triage ledger'}event.target.value=''};renderTriage()}'''
     template = template.replace('.trend{', gate_css + '.trend{', 1)
     template = template.replace('<section class="trend" id="trend" hidden>', gate_html + '<section class="trend" id="trend" hidden>', 1)
     template = template.replace("if(F.history){", gate_js + "if(F.history){", 1)

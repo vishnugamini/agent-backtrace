@@ -14,7 +14,7 @@ from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_pol
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_fleet_junit_xml, render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
-from .fleet import evaluate_fleet_gate, scan_traces, update_fleet_history, write_fleet_investigations, write_fleet_report
+from .fleet import apply_triage_ledger, evaluate_fleet_gate, load_triage_ledger, scan_traces, update_fleet_history, write_fleet_investigations, write_fleet_report
 from .notify import build_fleet_notification, deliver_webhook, format_fleet_notification, serialize_webhook_payload, validate_webhook_url
 from .report import write_report
 
@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history-limit", type=positive_int, default=50, metavar="N", help="Maximum snapshots retained by --history (default: 50)")
     parser.add_argument("--investigation-dir", type=Path, metavar="DIR", help="With --scan, write linked full HTML reports for fleet investigation")
     parser.add_argument("--investigation-scope", choices=("attention", "all"), help="Reports to generate: runs needing attention (default) or all readable runs")
+    parser.add_argument("--triage-file", type=Path, metavar="JSON", help="With investigation reports, seed reviewed/open incident state and notes from a validated ledger")
     parser.add_argument("--fleet-policy", type=Path, metavar="JSON", help="With --scan, load reusable fleet-gate thresholds from a validated JSON policy")
     parser.add_argument("--max-fleet-needs-attention", type=nonnegative_int, metavar="N", help="With --scan, fail when more than N runs need attention")
     parser.add_argument("--max-fleet-unresolved", type=nonnegative_int, metavar="N", help="With --scan, fail when unresolved incidents exceed N")
@@ -489,6 +490,13 @@ def _scan(args: argparse.Namespace) -> int:
                 scope=args.investigation_scope or "attention",
                 suppress=args.suppress,
             )
+            if args.triage_file:
+                apply_triage_ledger(
+                    fleet,
+                    load_triage_ledger(args.triage_file),
+                    source_name=args.triage_file.name,
+                    suppress=args.suppress,
+                )
         if args.history:
             fleet["history"] = update_fleet_history(fleet, args.history, limit=args.history_limit)
         fleet["quality_gate"] = evaluate_fleet_gate(fleet, args._fleet_gate_spec)
@@ -556,6 +564,12 @@ def _scan(args: argparse.Namespace) -> int:
                 f"{investigation['scope']} scope · {investigation['unresolved_incidents']} incident link(s) · "
                 f"{investigation['restart_briefs_written']} restart brief(s) · manifest written"
             )
+        if fleet.get("triage"):
+            triage = fleet["triage"]
+            print(
+                f"Fleet triage: {triage['reviewed_incidents']} reviewed · {triage['open_incidents']} open · "
+                f"{triage['matched_entries']}/{triage['entries']} ledger entries matched · {triage['source']}"
+            )
         if fleet["notification"]["configured"]:
             notification = fleet["notification"]
             suffix = f" · HTTP {notification['status_code']}" if notification["status_code"] is not None else ""
@@ -583,6 +597,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.investigation_scope and not args.investigation_dir:
         print("backtrace-agent: --investigation-scope requires --investigation-dir", file=sys.stderr)
+        return 2
+    if args.triage_file and not args.investigation_dir:
+        print("backtrace-agent: --triage-file requires --investigation-dir", file=sys.stderr)
         return 2
     if args.fleet_policy and not args.scan:
         print("backtrace-agent: --fleet-policy requires --scan", file=sys.stderr)

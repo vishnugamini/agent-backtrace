@@ -14,7 +14,7 @@ from backtrace_agent.cli import _watch, build_fleet_policy_spec, build_parser, b
 from backtrace_agent.ci import render_fleet_junit_xml, render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
-from backtrace_agent.fleet import discover_traces, evaluate_fleet_gate, render_fleet_html, scan_traces, update_fleet_history
+from backtrace_agent.fleet import apply_triage_ledger, discover_traces, evaluate_fleet_gate, load_triage_ledger, render_fleet_html, scan_traces, update_fleet_history
 from backtrace_agent.notify import build_fleet_notification, deliver_webhook, format_fleet_notification, serialize_webhook_payload, validate_webhook_url
 from backtrace_agent.report import render_html
 
@@ -573,6 +573,11 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
     assert "UNRESOLVED INCIDENT QUEUE" in dashboard_text
     assert "OPEN EXACT FAILURE" in dashboard_text
     assert "OPEN RESTART BRIEF" in dashboard_text
+    assert "Download ledger" in dashboard_text
+    assert "Import ledger" in dashboard_text
+    assert "MARK REVIEWED" in dashboard_text
+    assert "backtrace-triage:" in dashboard_text
+    assert "localStorage" in dashboard_text
     assert ".investigation-pack[hidden]{display:none}" in dashboard_text
     assert "report ready" in dashboard_text
     assert '"reports_written": 1' in dashboard_text
@@ -596,6 +601,66 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
     assert "Fleet investigations: 2 report(s) · all scope · 1 incident link(s) · 1 restart brief(s) · manifest written" in capsys.readouterr().out
     assert len(json.loads((all_details / "manifest.json").read_text())["reports"]) == 2
 
+    triage_file = tmp_path / "team-triage.json"
+    triage_file.write_text(json.dumps({
+        "schema_version": 1,
+        "incidents": [{
+            "incident_id": incident["id"],
+            "event_id": incident["event_id"],
+            "state": "reviewed",
+            "note": "private needle review ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "updated_at": "2026-08-30T12:30:00Z",
+        }],
+    }))
+    assert load_triage_ledger(triage_file)["incidents"][0]["state"] == "reviewed"
+    direct = json.loads(json.dumps(fleet))
+    triage_summary = apply_triage_ledger(direct, load_triage_ledger(triage_file), source_name=triage_file.name, suppress=["needle"])
+    assert triage_summary == {
+        "configured": True,
+        "source": triage_file.name,
+        "entries": 1,
+        "matched_entries": 1,
+        "reviewed_incidents": 1,
+        "open_incidents": 0,
+    }
+    assert direct["incident_queue"][0]["triage_note"] == "[suppressed]"
+    redacted = json.loads(json.dumps(fleet))
+    apply_triage_ledger(redacted, load_triage_ledger(triage_file), source_name=triage_file.name)
+    assert "ghp_" not in redacted["incident_queue"][0]["triage_note"]
+    assert "[REDACTED_GITHUB_TOKEN]" in redacted["incident_queue"][0]["triage_note"]
+    unseeded = json.loads(json.dumps(fleet))
+    apply_triage_ledger(unseeded, {"schema_version": 1, "incidents": []}, source_name="empty.json")
+    assert unseeded["incident_queue"][0]["triage_updated_at"] == "1970-01-01T00:00:00Z"
+    triage_dashboard = tmp_path / "triaged-fleet.html"
+    assert main([
+        "--scan", str(root), "--investigation-dir", str(details),
+        "--triage-file", str(triage_file), "--suppress", "needle",
+        "--json", "-o", str(triage_dashboard),
+    ]) == 0
+    triaged = json.loads(capsys.readouterr().out)
+    assert triaged["triage"]["source"] == triage_file.name
+    assert triaged["incident_queue"][0]["triage_state"] == "reviewed"
+    assert triaged["incident_queue"][0]["triage_note"] == "[suppressed]"
+    assert f'"source": "{triage_file.name}"' in triage_dashboard.read_text()
+
+    invalid_ledgers = [
+        ({}, "exactly schema_version and incidents"),
+        ({"schema_version": 2, "incidents": []}, "schema_version must be 1"),
+        ({"schema_version": 1, "incidents": {}}, "must be an array"),
+        ({"schema_version": 1, "incidents": [{"incident_id": "x"}]}, "missing or unknown"),
+        ({"schema_version": 1, "incidents": [{
+            "incident_id": "x", "event_id": "e", "state": "closed", "note": "", "updated_at": "2026-08-30T12:30:00Z",
+        }]}, "state must be open or reviewed"),
+        ({"schema_version": 1, "incidents": [{
+            "incident_id": "x", "event_id": "e", "state": "open", "note": "", "updated_at": "2026-08-30T12:30:00",
+        }]}, "must include a timezone"),
+    ]
+    for value, error in invalid_ledgers:
+        invalid_ledger = tmp_path / "invalid-triage.json"
+        invalid_ledger.write_text(json.dumps(value))
+        with pytest.raises(ValueError, match=error):
+            load_triage_ledger(invalid_ledger)
+
     invalid_destination = tmp_path / "not-a-directory"
     invalid_destination.write_text("occupied")
     missing_dashboard = tmp_path / "missing.html"
@@ -608,6 +673,8 @@ def test_fleet_investigation_pack_links_reports_and_minimizes_manifest(tmp_path,
     assert "--investigation-dir requires --scan" in capsys.readouterr().err
     assert main(["--scan", str(root), "--investigation-scope", "all"]) == 2
     assert "--investigation-scope requires --investigation-dir" in capsys.readouterr().err
+    assert main(["--scan", str(root), "--triage-file", str(triage_file)]) == 2
+    assert "--triage-file requires --investigation-dir" in capsys.readouterr().err
 
 
 def test_fleet_webhook_is_private_signed_retryable_and_visible(tmp_path, capsys, monkeypatch):

@@ -115,6 +115,17 @@ The default `attention` scope generates a complete interactive report for each r
 
 The dashboard also links a privacy-minimized `manifest.json` containing status, risk, event counts, fingerprints, opaque report/brief filenames, stable incident/event IDs, and deep links—never source paths, objectives, models, operation text, failure details, or raw events. Reports, briefs, and incident extraction inherit every `--suppress` term. Files are written atomically, and the manifest is written last; reruns never delete unrelated or stale files from the destination directory. Backtrace policy files and investigation manifests are excluded from trace discovery so configuration cannot be mistaken for a run.
 
+Track human review without pretending that a failure recovered in the source trace. The incident queue can mark items reviewed, attach notes, filter open/reviewed incidents, persist state in the local browser, and download or import a portable JSON ledger. Seed a regenerated dashboard from that ledger with Python-side validation:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --investigation-dir fleet-investigations \
+  --triage-file team-triage.json \
+  -o session-fleet.html
+```
+
+Ledger entries use stable incident and event IDs, an `open` or `reviewed` state, a note of at most 2,000 characters, and a timezone-aware update timestamp. Unknown fields, duplicate incident IDs, invalid states, malformed timestamps, mismatched event IDs, and invalid schemas are rejected or left unmatched rather than silently attached to the wrong failure. Newer browser-local state wins over older seeded state. Seeded notes inherit `--suppress`; triage notes never enter fleet history, webhooks, or the privacy-minimized investigation manifest.
+
 Notify an external automation without putting its URL or secret in shell history:
 
 ```bash
