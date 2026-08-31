@@ -276,7 +276,7 @@ def test_trace_doctor_reports_damage_truncation_duplicate_ids_order_and_gates(tm
 
 
 def test_fleet_scan_ranks_runs_handles_errors_suppression_html_and_cli(tmp_path, capsys):
-    root = tmp_path / "sessions"
+    root = tmp_path / "sessions with spaces"
     root.mkdir()
     write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "quiet run"}}], "client-alpha.jsonl")
     write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "deployment failed"}}], "failed.jsonl")
@@ -300,11 +300,15 @@ def test_fleet_scan_ranks_runs_handles_errors_suppression_html_and_cli(tmp_path,
     failed = next(item for item in fleet["runs"] if item["path"] == "failed.jsonl")
     assert failed["status"] == "critical"
     assert failed["unresolved_incidents"] == 1
+    assert failed["source_argument"].startswith("'")
     html = render_fleet_html(fleet)
     assert "Session fleet" in html
     assert "MULTI-RUN SUPERVISION" in html
     assert "Highest risk" in html
     assert "Copy command" in html
+    assert "Set as baseline" in html
+    assert "Copy comparison command" in html
+    assert "--compare ${baseline.source_argument}" in html
     assert "https://" not in html
 
     report = tmp_path / "fleet.html"
