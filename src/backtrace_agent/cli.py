@@ -14,6 +14,7 @@ from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_pol
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
+from .fleet import scan_traces, write_fleet_report
 from .report import write_report
 
 
@@ -56,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("trace", type=Path, nargs="?", help="JSON/JSONL trace. Omit to use the newest local Codex session.")
     parser.add_argument("--verify-bundle", type=Path, metavar="ZIP", help="Verify an evidence bundle's structure, sizes, and hashes, then exit")
     parser.add_argument("--verify-source", type=Path, metavar="TRACE", help="With --verify-bundle, prove that TRACE matches the recorded source fingerprint")
+    parser.add_argument("--scan", type=Path, metavar="DIR", help="Build a risk-ranked dashboard across recent JSON/JSONL traces below DIR")
+    parser.add_argument("--scan-limit", type=positive_int, default=50, metavar="N", help="Maximum newest trace files to inspect with --scan (default: 50)")
     parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
     parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
@@ -421,14 +424,40 @@ def _doctor(args: argparse.Namespace, trace: Path) -> int:
     return 0
 
 
+def _scan(args: argparse.Namespace) -> int:
+    try:
+        fleet = scan_traces(args.scan, limit=args.scan_limit, suppress=args.suppress)
+        report = write_fleet_report(fleet, args.output)
+    except (OSError, ValueError) as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(fleet, indent=2, ensure_ascii=False))
+    else:
+        summary = fleet["summary"]
+        print(
+            f"Session fleet: {summary['runs']} run(s) · {summary['needs_attention']} need attention "
+            f"· {summary['unresolved_incidents']} unresolved · {fleet['parse_errors']} unreadable"
+        )
+        for item in fleet["runs"][:10]:
+            print(
+                f"- [{item['status'].upper()}] risk {item['risk_score']:>3} · {item['path']} "
+                f"· {item['failures']} failed · {item['unresolved_incidents']} unresolved"
+            )
+        print(f"Fleet report: {report.resolve()}")
+    if args.open:
+        webbrowser.open(report.resolve().as_uri())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify_source and not args.verify_bundle:
         print("backtrace-agent: --verify-source requires --verify-bundle", file=sys.stderr)
         return 2
     if args.verify_bundle:
-        if args.trace or args.watch:
-            print("backtrace-agent: do not pass a trace or --watch with --verify-bundle", file=sys.stderr)
+        if args.trace or args.watch or args.scan:
+            print("backtrace-agent: do not pass a trace, --watch, or --scan with --verify-bundle", file=sys.stderr)
             return 2
         result = verify_evidence_bundle(args.verify_bundle, source_trace=args.verify_source)
         if result["valid"]:
@@ -439,6 +468,20 @@ def main(argv: list[str] | None = None) -> int:
         for error in result["errors"]:
             print(f"- {error}", file=sys.stderr)
         return 1
+    if args.scan:
+        gate_values = any(getattr(args, key) is not None for key in INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS)
+        conflicting = (
+            args.trace or args.watch or args.compare or args.from_event or args.to_event or args.agent
+            or args.incident or args.context_events is not None or args.list_incidents or args.find
+            or args.audit_ingestion or args.doctor or args.restart_at or args.bundle or args.policy
+            or args.normalized_output or args.summary_output or args.junit_output or args.fail_on_errors
+            or args.require_evidence or args.fail_on_regression or args.event_kind
+            or args.event_status != "all" or args.incident_status != "all" or gate_values
+        )
+        if conflicting:
+            print("backtrace-agent: --scan cannot be combined with a trace, watch, focused analysis, exports, or quality-gate options", file=sys.stderr)
+            return 2
+        return _scan(args)
     try:
         trace = args.trace or newest_codex_session()
     except (OSError, ValueError) as exc:

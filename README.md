@@ -27,6 +27,7 @@ Backtrace focuses on the gap between **viewing a log** and **recovering from it*
 - Fingerprint the exact source trace in every artifact so reviewers can prove where sanitized evidence came from.
 - Extract an inclusive event range or selected agents into an honestly scoped incident report instead of sharing an entire run.
 - Compare a current run with a baseline using normalized failure, repetition, stall, tool-time, verification, operation, and file-scope changes.
+- Scan many recent sessions into one risk-ranked fleet dashboard so the run needing human attention surfaces first.
 
 ## Quick start
 
@@ -61,6 +62,16 @@ backtrace-agent current.jsonl --watch --watch-interval 0.5 \
 ```
 
 Watch mode processes the existing trace immediately, then polls its modification time and size until Ctrl-C. HTML, JSON, Markdown, restart briefs, and ZIP bundles are replaced atomically, so readers never observe half-written output. Parse errors do not overwrite the last valid artifacts, and `--open` opens only the first successful report rather than a new browser tab on every update.
+
+Triage many agent sessions at once:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --scan-limit 50 \
+  -o session-fleet.html
+```
+
+The fleet dashboard recursively selects the newest JSON/JSONL candidates, skips dependency/build directories and common project manifests, and summarizes each run without embedding raw provider records. Search by objective, model, session, or path; filter by status; sort by risk, recency, failures, or unresolved incidents; then copy a complete command for the selected trace. Unreadable traces stay visible instead of disappearing. Risk is a transparent, capped triage heuristic based on source-integrity issues, unsupported provider items, unresolved incidents, destructive attempts, failures, repetition, and stalls—not a claim about agent quality. Add `--json` for structured automation output and repeatable `--suppress` terms before sharing the dashboard.
 
 Compare a new run with a known baseline:
 
@@ -279,7 +290,7 @@ For Codex sessions, Backtrace deliberately uses canonical completed items and ig
 ## Python API
 
 ```python
-from backtrace_agent import build_restart_brief, detect_signals, parse_trace
+from backtrace_agent import build_restart_brief, detect_signals, parse_trace, scan_traces
 from backtrace_agent.report import write_report
 
 run = parse_trace("~/.codex/sessions/example.jsonl")
@@ -287,6 +298,7 @@ signals = detect_signals(run.events)
 write_report(run, "report.html")
 
 brief = build_restart_brief(run, checkpoint="evt-0042")
+fleet = scan_traces("~/.codex/sessions", limit=50)
 ```
 
 ## Detection rules
@@ -333,7 +345,7 @@ npm run build
 Project layout:
 
 ```text
-src/backtrace_agent/   Python parser, diagnostics, report, and CLI
+src/backtrace_agent/   Python parser, diagnostics, single-run/fleet reports, and CLI
 tests_python/          Python behavior tests
 examples/              Sample trace
 app/ + lib/            Interactive demo
@@ -342,9 +354,8 @@ app/ + lib/            Interactive demo
 ## Roadmap
 
 - First-class Claude Code and OpenTelemetry adapters
-- Trace-to-trace comparison for regressions
-- User-defined signal rules
-- Optional live tailing of active sessions
+- User-defined signal and policy plugins
+- Persistent trend history across fleet scans
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.

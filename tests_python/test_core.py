@@ -11,6 +11,7 @@ from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_po
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
+from backtrace_agent.fleet import discover_traces, render_fleet_html, scan_traces
 from backtrace_agent.report import render_html
 
 
@@ -272,6 +273,53 @@ def test_trace_doctor_reports_damage_truncation_duplicate_ids_order_and_gates(tm
     assert encoding_health["encoding_replacement_characters"] == 1
     assert encoding_health["malformed_records"] == 1
     assert encoding_health["healthy"] is False
+
+
+def test_fleet_scan_ranks_runs_handles_errors_suppression_html_and_cli(tmp_path, capsys):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "message", "payload": {"content": "quiet run"}}], "client-alpha.jsonl")
+    write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "deployment failed"}}], "failed.jsonl")
+    (root / "broken.jsonl").write_text('{"unfinished":', encoding="utf-8")
+    (root / "package.json").write_text("{}", encoding="utf-8")
+    ignored = root / "node_modules"
+    ignored.mkdir()
+    write_jsonl(ignored, [{"type": "error", "payload": {"message": "ignore me"}}], "ignored.jsonl")
+
+    discovered = discover_traces(root, limit=10)
+    assert {path.name for path in discovered} == {"client-alpha.jsonl", "failed.jsonl", "broken.jsonl"}
+    fleet = scan_traces(root, limit=10, suppress=["client-alpha"])
+    assert fleet["summary"]["runs"] == 3
+    assert fleet["parse_errors"] == 1
+    assert fleet["status_counts"] == {"critical": 1, "attention": 0, "clean": 1, "unreadable": 1}
+    assert fleet["summary"]["needs_attention"] == 2
+    assert fleet["runs"][0]["status"] == "unreadable"
+    assert any(item["path"] == "[suppressed]" for item in fleet["runs"])
+    assert len({item["id"] for item in fleet["runs"]}) == 3
+    assert "client-alpha" not in json.dumps(fleet).casefold()
+    failed = next(item for item in fleet["runs"] if item["path"] == "failed.jsonl")
+    assert failed["status"] == "critical"
+    assert failed["unresolved_incidents"] == 1
+    html = render_fleet_html(fleet)
+    assert "Session fleet" in html
+    assert "MULTI-RUN SUPERVISION" in html
+    assert "Highest risk" in html
+    assert "Copy command" in html
+    assert "https://" not in html
+
+    report = tmp_path / "fleet.html"
+    assert main(["--scan", str(root), "--scan-limit", "10", "--suppress", "client-alpha", "-o", str(report)]) == 0
+    text_output = capsys.readouterr().out
+    assert "Session fleet: 3 run(s) · 2 need attention" in text_output
+    assert f"Fleet report: {report.resolve()}" in text_output
+    assert report.exists()
+    json_report = tmp_path / "fleet-json.html"
+    assert main(["--scan", str(root), "--scan-limit", "2", "--json", "-o", str(json_report)]) == 0
+    json_output = json.loads(capsys.readouterr().out)
+    assert json_output["summary"]["runs"] == 2
+    assert json_report.exists()
+    assert main(["--scan", str(root), str(root / "failed.jsonl"), "-o", str(tmp_path / "conflict.html")]) == 2
+    capsys.readouterr()
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):
