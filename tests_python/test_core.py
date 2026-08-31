@@ -8,10 +8,10 @@ import pytest
 
 from backtrace_agent.analysis import analyze_run, catalog_incidents, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
-from backtrace_agent.ci import render_junit_xml
+from backtrace_agent.ci import render_fleet_junit_xml, render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
 from backtrace_agent.core import Event, Run, build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
-from backtrace_agent.fleet import discover_traces, render_fleet_html, scan_traces, update_fleet_history
+from backtrace_agent.fleet import discover_traces, evaluate_fleet_gate, render_fleet_html, scan_traces, update_fleet_history
 from backtrace_agent.report import render_html
 
 
@@ -390,6 +390,63 @@ def test_fleet_history_is_private_bounded_atomic_and_reports_real_transitions(tm
     assert "Fleet trend:" in capsys.readouterr().out
     assert main([str(failed), "--history", str(cli_history)]) == 2
     assert "--history requires --scan" in capsys.readouterr().err
+
+
+def test_fleet_gates_skip_missing_baselines_fail_ci_and_export_junit(tmp_path, capsys):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    failed = write_jsonl(root, [{"timestamp": "2026-08-29T12:00:00Z", "type": "error", "payload": {"message": "failure"}}], "failed.jsonl")
+    fleet = scan_traces(root, limit=10)
+    gate = evaluate_fleet_gate(fleet, {
+        "max_fleet_needs_attention": 0,
+        "max_fleet_unresolved": 0,
+        "max_fleet_source_issues": 0,
+        "max_new_attention": None,
+        "fail_on_fleet_regression": False,
+    })
+    assert gate["configured"] is True
+    assert gate["passed"] is False
+    assert gate["summary"] == {"passed": 1, "failed": 2, "skipped": 0}
+    xml = ET.fromstring(render_fleet_junit_xml(fleet, gate))
+    assert xml.attrib["tests"] == "3"
+    assert xml.attrib["failures"] == "2"
+    assert xml.find("./properties/property[@name='runs']").attrib["value"] == "1"
+
+    first_history = update_fleet_history(fleet, tmp_path / "history.json")
+    first_gate = evaluate_fleet_gate({**fleet, "history": first_history}, {
+        "max_fleet_needs_attention": None,
+        "max_fleet_unresolved": None,
+        "max_fleet_source_issues": None,
+        "max_new_attention": 0,
+        "fail_on_fleet_regression": True,
+    })
+    assert first_gate["passed"] is True
+    assert first_gate["summary"] == {"passed": 0, "failed": 0, "skipped": 2}
+    skipped_xml = ET.fromstring(render_fleet_junit_xml(fleet, first_gate))
+    assert skipped_xml.attrib["skipped"] == "2"
+    assert len(skipped_xml.findall("./testcase/skipped")) == 2
+    html = render_fleet_html({**fleet, "history": first_history, "quality_gate": first_gate})
+    assert "AUTOMATION DECISION" in html
+    assert "Fleet gate passed" in html
+    assert "baseline unavailable" in html
+    assert "gate-grid{grid-template-columns:1fr}" in html
+
+    junit = tmp_path / "fleet.xml"
+    report = tmp_path / "fleet.html"
+    assert main(["--scan", str(root), "--max-fleet-unresolved", "0", "--junit-output", str(junit), "-o", str(report)]) == 1
+    output = capsys.readouterr().out
+    assert "Fleet gate: FAILED" in output
+    assert f"Fleet JUnit: {junit.resolve()}" in output
+    assert ET.parse(junit).getroot().attrib["failures"] == "1"
+    assert "Fleet gate failed" in report.read_text()
+    assert main(["--scan", str(root), "--max-fleet-unresolved", "0", "--json", "-o", str(report)]) == 1
+    json_gate = json.loads(capsys.readouterr().out)["quality_gate"]
+    assert json_gate["configured"] is True and json_gate["passed"] is False
+    assert json_gate["checks"][0]["key"] == "max_fleet_unresolved"
+    assert main(["--scan", str(root), "--fail-on-fleet-regression", "-o", str(report)]) == 2
+    assert "trend gate options require --history" in capsys.readouterr().err
+    assert main([str(failed), "--max-fleet-unresolved", "0"]) == 2
+    assert "fleet gate options require --scan" in capsys.readouterr().err
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):

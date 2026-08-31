@@ -77,6 +77,20 @@ The fleet dashboard recursively selects the newest JSON/JSONL candidates, skips 
 
 Optional `--history` turns repeated scans into a bounded trend report: status regressions and improvements for the same run, new risky runs, aggregate deltas, and a recent-scan chart. A run that disappears is labeled **left scan window**, never recovered. The history file is replaced atomically and stores no prompts, objectives, models, source paths, filenames, or raw events—only timestamps, aggregate metrics, and SHA-256 run identities. Invalid existing history is left unchanged. The first scan records a baseline; later scans compare against the immediately previous snapshot.
 
+Turn the fleet into a CI decision:
+
+```bash
+backtrace-agent --scan ~/.codex/sessions \
+  --history ~/.local/share/backtrace/fleet-history.json \
+  --max-fleet-unresolved 0 \
+  --max-new-attention 0 \
+  --fail-on-fleet-regression \
+  --junit-output fleet-quality.xml \
+  -o session-fleet.html
+```
+
+Fleet gates are included in HTML and `--json`, and a failed configured check returns exit code 1. Current-state gates cover runs needing attention, unresolved incidents, and source-integrity issues. Trend gates cover new risky runs and worsened run statuses. Trend checks are explicitly skipped on the first snapshot because there is no previous scan to compare; JUnit preserves that skipped state instead of reporting invented evidence.
+
 Compare a new run with a known baseline:
 
 ```bash
@@ -359,7 +373,7 @@ app/ + lib/            Interactive demo
 
 - First-class Claude Code and OpenTelemetry adapters
 - User-defined signal and policy plugins
-- Configurable retention and alert hooks for fleet trends
+- Notification integrations for fleet gate failures
 - OpenTelemetry import/export
 
 Contributions and real-world sanitized trace fixtures are welcome.

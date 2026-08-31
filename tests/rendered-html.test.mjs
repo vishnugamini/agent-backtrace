@@ -39,6 +39,8 @@ test("keeps trace import and restart behavior in the client source", async () =>
   assert.match(page, /--scan/);
   assert.match(page, /--history/);
   assert.match(page, /Fleet trend:/);
+  assert.match(page, /--fail-on-fleet-regression/);
+  assert.match(page, /Fleet gate: FAILED/);
   assert.match(page, /navigator\.clipboard\.writeText/);
   assert.match(trace, /function parseTrace/);
   assert.match(trace, /function detectSignals/);

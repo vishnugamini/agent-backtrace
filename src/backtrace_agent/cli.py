@@ -12,9 +12,9 @@ from pathlib import Path
 
 from .analysis import analyze_run, catalog_incidents, compare_runs, evaluate_policy, focus_incident, render_markdown_summary, search_events
 from .bundle import verify_evidence_bundle, write_evidence_bundle
-from .ci import render_junit_xml
+from .ci import render_fleet_junit_xml, render_junit_xml
 from .core import build_restart_brief, detect_signals, inspect_source_health, parse_trace, slice_run, suppress_content
-from .fleet import scan_traces, update_fleet_history, write_fleet_report
+from .fleet import evaluate_fleet_gate, scan_traces, update_fleet_history, write_fleet_report
 from .report import write_report
 
 
@@ -22,6 +22,7 @@ INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructi
 NUMBER_POLICY_KEYS = {"max_failure_rate", "max_tokens_per_action", "min_cache_ratio"}
 BOOLEAN_POLICY_KEYS = {"require_evidence", "fail_on_regression"}
 POLICY_KEYS = INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS | BOOLEAN_POLICY_KEYS
+FLEET_INTEGER_GATE_KEYS = {"max_fleet_needs_attention", "max_fleet_unresolved", "max_fleet_source_issues", "max_new_attention"}
 
 
 def nonnegative_int(value: str) -> int:
@@ -61,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-limit", type=positive_int, default=50, metavar="N", help="Maximum newest trace files to inspect with --scan (default: 50)")
     parser.add_argument("--history", type=Path, metavar="JSON", help="With --scan, append a privacy-minimized snapshot and show fleet trends")
     parser.add_argument("--history-limit", type=positive_int, default=50, metavar="N", help="Maximum snapshots retained by --history (default: 50)")
+    parser.add_argument("--max-fleet-needs-attention", type=nonnegative_int, metavar="N", help="With --scan, fail when more than N runs need attention")
+    parser.add_argument("--max-fleet-unresolved", type=nonnegative_int, metavar="N", help="With --scan, fail when unresolved incidents exceed N")
+    parser.add_argument("--max-fleet-source-issues", type=nonnegative_int, metavar="N", help="With --scan, fail when source-integrity issues exceed N")
+    parser.add_argument("--max-new-attention", type=nonnegative_int, metavar="N", help="With --scan and --history, fail when new risky runs exceed N")
+    parser.add_argument("--fail-on-fleet-regression", action="store_true", help="With --scan and --history, fail when any existing run's status worsens")
     parser.add_argument("--watch", action="store_true", help="Regenerate outputs whenever the trace file changes; stop with Ctrl-C")
     parser.add_argument("--watch-interval", type=positive_float, default=1.0, metavar="SECONDS", help="Polling interval for --watch (default: 1.0)")
     parser.add_argument("--output", "-o", type=Path, default=Path("backtrace-report.html"), help="HTML report path")
@@ -431,7 +437,12 @@ def _scan(args: argparse.Namespace) -> int:
         fleet = scan_traces(args.scan, limit=args.scan_limit, suppress=args.suppress)
         if args.history:
             fleet["history"] = update_fleet_history(fleet, args.history, limit=args.history_limit)
+        gate_spec = {key: getattr(args, key) for key in FLEET_INTEGER_GATE_KEYS}
+        gate_spec["fail_on_fleet_regression"] = args.fail_on_fleet_regression
+        fleet["quality_gate"] = evaluate_fleet_gate(fleet, gate_spec)
         report = write_fleet_report(fleet, args.output)
+        if args.junit_output:
+            _atomic_write_text(args.junit_output, render_fleet_junit_xml(fleet, fleet["quality_gate"]))
     except (OSError, ValueError) as exc:
         print(f"backtrace-agent: {exc}", file=sys.stderr)
         return 2
@@ -454,21 +465,36 @@ def _scan(args: argparse.Namespace) -> int:
                 )
             else:
                 print(f"Fleet trend: first snapshot recorded · {trend['new_runs']} run(s) · no previous baseline")
+        if fleet["quality_gate"]["configured"]:
+            gate_summary = fleet["quality_gate"]["summary"]
+            print(
+                f"Fleet gate: {'PASS' if fleet['quality_gate']['passed'] else 'FAILED'} · "
+                f"{gate_summary['passed']} passed · {gate_summary['failed']} failed · {gate_summary['skipped']} skipped"
+            )
         for item in fleet["runs"][:10]:
             print(
                 f"- [{item['status'].upper()}] risk {item['risk_score']:>3} · {item['path']} "
                 f"· {item['failures']} failed · {item['unresolved_incidents']} unresolved"
             )
         print(f"Fleet report: {report.resolve()}")
+        if args.junit_output:
+            print(f"Fleet JUnit: {args.junit_output.resolve()}")
     if args.open:
         webbrowser.open(report.resolve().as_uri())
-    return 0
+    return 1 if fleet["quality_gate"]["configured"] and not fleet["quality_gate"]["passed"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    fleet_gate_requested = args.fail_on_fleet_regression or any(getattr(args, key) is not None for key in FLEET_INTEGER_GATE_KEYS)
+    if fleet_gate_requested and not args.scan:
+        print("backtrace-agent: fleet gate options require --scan", file=sys.stderr)
+        return 2
     if args.history and not args.scan:
         print("backtrace-agent: --history requires --scan", file=sys.stderr)
+        return 2
+    if (args.fail_on_fleet_regression or args.max_new_attention is not None) and not args.history:
+        print("backtrace-agent: trend gate options require --history", file=sys.stderr)
         return 2
     if args.verify_source and not args.verify_bundle:
         print("backtrace-agent: --verify-source requires --verify-bundle", file=sys.stderr)
@@ -492,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
             args.trace or args.watch or args.compare or args.from_event or args.to_event or args.agent
             or args.incident or args.context_events is not None or args.list_incidents or args.find
             or args.audit_ingestion or args.doctor or args.restart_at or args.bundle or args.policy
-            or args.normalized_output or args.summary_output or args.junit_output or args.fail_on_errors
+            or args.normalized_output or args.summary_output or args.fail_on_errors
             or args.require_evidence or args.fail_on_regression or args.event_kind
             or args.event_status != "all" or args.incident_status != "all" or gate_values
         )
