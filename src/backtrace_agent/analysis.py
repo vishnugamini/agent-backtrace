@@ -6,7 +6,7 @@ import re
 from statistics import median
 from typing import Any
 
-from .core import Event, Run, detect_signals
+from .core import Event, Run, detect_signals, slice_run
 
 
 @dataclass(slots=True)
@@ -313,6 +313,83 @@ def analyze_run(run: Run) -> dict[str, Any]:
     }
 
 
+def focus_incident(
+    run: Run,
+    reference: str,
+    *,
+    context_events: int = 3,
+    agents: list[str] | None = None,
+) -> Run:
+    """Expand an incident reference into a focused, provenance-preserving run."""
+    if context_events < 0:
+        raise ValueError("Incident context must be zero or greater.")
+    agents = list(dict.fromkeys(agent.strip() for agent in (agents or []) if agent.strip()))
+    incidents = analyze_run(run)["incidents"]["items"]
+    incident = next((
+        item for item in incidents
+        if reference == item["id"]
+        or reference in item["failure_event_ids"]
+        or reference == item.get("recovery_event_id")
+    ), None)
+    if incident is None:
+        raise ValueError(
+            f"No failure incident contains event or incident ID: {reference}. "
+            "Use a failure, recovery, or incident ID from the report's Incidents view."
+        )
+
+    event_indexes = {event.id: index for index, event in enumerate(run.events)}
+    first_index = event_indexes[incident["first_failure_event_id"]]
+    last_evidence_id = incident.get("recovery_event_id") or incident["latest_failure_event_id"]
+    last_index = event_indexes[last_evidence_id]
+    required_ids = set(incident["failure_event_ids"])
+    if incident.get("recovery_event_id"):
+        required_ids.add(incident["recovery_event_id"])
+    if agents:
+        available_agents = {agent.casefold(): agent for agent in run.agents}
+        unknown_agents = [agent for agent in agents if agent.casefold() not in available_agents]
+        if unknown_agents:
+            raise ValueError(
+                f"Unknown --agent value(s): {', '.join(unknown_agents)}. "
+                f"Available agents: {', '.join(run.agents)}"
+            )
+        selected_agent_keys = {agent.casefold() for agent in agents}
+        missing_for_agent = sorted(
+            event.id for event in run.events
+            if event.id in required_ids and event.agent.casefold() not in selected_agent_keys
+        )
+        if missing_for_agent:
+            raise ValueError(
+                "The --agent filter removes incident evidence: " + ", ".join(missing_for_agent)
+            )
+    range_start = max(0, first_index - context_events)
+    range_end = min(len(run.events) - 1, last_index + context_events)
+    focused = slice_run(
+        run,
+        from_event=run.events[range_start].id,
+        to_event=run.events[range_end].id,
+        agents=agents,
+    )
+    selected_ids = {event.id for event in focused.events}
+    missing = sorted(required_ids - selected_ids)
+    if missing:
+        raise ValueError(
+            "The --agent filter removes incident evidence: " + ", ".join(missing)
+        )
+    focused.metadata["scope"].update({
+        "mode": "incident",
+        "incident": {
+            "id": incident["id"],
+            "reference": reference,
+            "operation": incident["operation"],
+            "status": incident["status"],
+            "failure_event_ids": incident["failure_event_ids"],
+            "recovery_event_id": incident.get("recovery_event_id"),
+            "context_events": context_events,
+        },
+    })
+    return focused
+
+
 def compare_runs(current: Run, baseline: Run) -> dict[str, Any]:
     """Compare two runs using normalized metrics and explain every conclusion."""
     current_analysis = analyze_run(current)
@@ -481,6 +558,12 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
             f"- Agents: {agent_text}",
             "- Token counters: omitted because the source records cumulative session usage",
         ]
+        incident = scope.get("incident") or {}
+        if incident:
+            scope_lines.append(
+                f"- Automatic incident focus: **{incident['operation']}** ({incident['status']}), "
+                f"{len(incident['failure_event_ids'])} failed attempt(s), ±{incident['context_events']} context events"
+            )
     lines = [
         f"# Backtrace summary: {run.name}", "",
         f"- Source: {run.source}", f"- Session: {run.session_id or 'unknown'}", f"- Model: {run.model or 'unknown'}",

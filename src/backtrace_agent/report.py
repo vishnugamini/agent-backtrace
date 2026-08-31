@@ -26,13 +26,20 @@ def render_html(run: Run, comparison: dict | None = None, quality_gate: dict | N
     scope_banner = ""
     if scope.get("active"):
         agents = ", ".join(scope.get("agents") or []) or "all agents"
+        incident = scope.get("incident") or {}
+        incident_text = ""
+        if incident:
+            incident_text = (
+                f' Automatic incident focus selected <strong>{html.escape(incident["operation"])}</strong> '
+                f'({html.escape(incident["status"])}), with {incident["context_events"]} surrounding event(s) on each side.'
+            )
         scope_pill = f'<span class="pill warn">FOCUSED {scope["selected_event_count"]}/{scope["source_event_count"]}</span>'
         scope_banner = (
             '<section style="margin:18px 0 0;border:1px solid #d7bc86;border-left:5px solid var(--amber);background:#fbf1df;padding:13px 15px">'
             '<strong style="display:block;font:800 10px monospace;letter-spacing:.1em;color:#80551d">FOCUSED TRACE SLICE</strong>'
             f'<p style="margin:4px 0 0;color:#5f5548">Showing {scope["selected_event_count"]} of {scope["source_event_count"]} normalized events, '
             f'from <code>{html.escape(scope["from_event"])}</code> through <code>{html.escape(scope["to_event"])}</code>, '
-            f'for {html.escape(agents)}. The timeline is rebased; cumulative token counters are intentionally omitted.</p></section>'
+            f'for {html.escape(agents)}. The timeline is rebased; cumulative token counters are intentionally omitted.{incident_text}</p></section>'
         )
     template = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -76,7 +83,7 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
         template = template.replace(key, value)
     template = template.replace(
         "function brief(e){",
-        "function brief(e){const scope=R.metadata?.scope;const scopeWarning=scope?.active?`## Scope warning\\nThis brief uses ${scope.selected_event_count} of ${scope.source_event_count} normalized events. Events outside ${scope.from_event} through ${scope.to_event} are not represented.\\n\\n`:'';",
+        "function brief(e){const scope=R.metadata?.scope;const incidentWarning=scope?.incident?`Automatic incident focus: ${scope.incident.operation} (${scope.incident.status}), with ${scope.incident.context_events} surrounding event(s) on each side.\\n`:'';const scopeWarning=scope?.active?`## Scope warning\\nThis brief uses ${scope.selected_event_count} of ${scope.source_event_count} normalized events. Events outside ${scope.from_event} through ${scope.to_event} are not represented.\\n${incidentWarning}\\n`:'';",
     )
     template = template.replace(
         "return `# Restart brief: ${R.name}\\n\\n## Objective",

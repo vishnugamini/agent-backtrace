@@ -9,7 +9,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from .analysis import analyze_run, compare_runs, evaluate_policy, render_markdown_summary
+from .analysis import analyze_run, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
 from .bundle import verify_evidence_bundle, write_evidence_bundle
 from .ci import render_junit_xml
 from .core import build_restart_brief, detect_signals, parse_trace, slice_run, suppress_content
@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from-event", metavar="EVENT_ID", help="Focus generated artifacts at this normalized event ID (inclusive)")
     parser.add_argument("--to-event", metavar="EVENT_ID", help="Focus generated artifacts at this normalized event ID (inclusive)")
     parser.add_argument("--agent", action="append", default=[], metavar="NAME", help="Include only this agent in a focused report; repeatable")
+    parser.add_argument("--incident", metavar="EVENT_OR_INCIDENT_ID", help="Automatically focus the complete incident containing this failure or recovery")
+    parser.add_argument("--context-events", type=nonnegative_int, metavar="N", help="Include N events before and after --incident evidence (default: 3)")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -146,10 +148,16 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     try:
         run = parse_trace(trace)
         baseline = parse_trace(args.compare) if args.compare else None
-        focused = bool(args.from_event or args.to_event or args.agent)
+        focused = bool(args.from_event or args.to_event or args.agent or args.incident)
         if focused and baseline:
             raise ValueError("Focused slicing cannot be combined with --compare because event ranges are run-specific.")
-        if focused:
+        if args.incident and (args.from_event or args.to_event):
+            raise ValueError("--incident chooses its own boundaries and cannot be combined with --from-event or --to-event.")
+        if args.context_events is not None and not args.incident:
+            raise ValueError("--context-events requires --incident.")
+        if args.incident:
+            run = focus_incident(run, args.incident, context_events=args.context_events if args.context_events is not None else 3, agents=args.agent)
+        elif focused:
             run = slice_run(run, from_event=args.from_event, to_event=args.to_event, agents=args.agent)
         if args.suppress:
             run = suppress_content(run, args.suppress)
@@ -181,6 +189,9 @@ def _process_once(args: argparse.Namespace, trace: Path, *, allow_open: bool = T
     if scope.get("active"):
         agent_text = f" · agents: {', '.join(scope['agents'])}" if scope.get("agents") else ""
         print(f"Focus: {scope['selected_event_count']}/{scope['source_event_count']} events · {scope['from_event']} → {scope['to_event']}{agent_text}")
+        incident = scope.get("incident") or {}
+        if incident:
+            print(f"Incident: {incident['operation']} · {incident['status']} · {len(incident['failure_event_ids'])} failed attempt(s) · context ±{incident['context_events']}")
     if comparison:
         summary = comparison["summary"]
         print(f"Comparison: {comparison['verdict']} · {summary['regressions']} regression(s) · {summary['improvements']} improvement(s) vs {args.compare.resolve()}")

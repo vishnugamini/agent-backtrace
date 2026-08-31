@@ -712,6 +712,11 @@ def build_restart_brief(run: Run, checkpoint: int | str = -1) -> str:
             f"This brief uses a focused slice containing {scope['selected_event_count']} of {scope['source_event_count']} normalized events. Events outside `{scope['from_event']}` through `{scope['to_event']}` are not represented.",
             "",
         ]
+        incident = scope.get("incident") or {}
+        if incident:
+            scope_notice[2:2] = [
+                f"Automatic incident focus: {incident['operation']} ({incident['status']}), with {incident['context_events']} surrounding event(s) on each side.",
+            ]
     lines = [
         f"# Restart brief: {run.name}", "", *scope_notice, "## Objective", run.goal or (turn.user_request if turn else "Continue the recorded agent task."), "",
         "## Current turn", (turn.user_request if turn and turn.user_request else "No user request was recovered for this turn."), "",

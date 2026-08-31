@@ -92,6 +92,18 @@ backtrace-agent run.jsonl \
 
 Event boundaries are inclusive and `--agent` is repeatable and case-insensitive. Focused artifacts retain the fingerprint of the complete source trace, record the exact range and selection in HTML, JSON, Markdown, and the bundle manifest, and rebase the visible timeline to the first selected event. Partial turns are labeled as such. Cumulative token counters are omitted because a session-wide counter cannot be truthfully attributed to a slice. Focused slicing is intentionally incompatible with `--compare`, whose event IDs and boundaries belong to a different run.
 
+If you have a failed event ID, let Backtrace find the whole retry and recovery chain automatically:
+
+```bash
+backtrace-agent run.jsonl \
+  --incident exec-failed-42 \
+  --context-events 2 \
+  --bundle incident-evidence.zip \
+  -o incident-report.html
+```
+
+`--incident` accepts the incident ID, any failed event in that incident, or its recovery event. Recovered incidents end at the first later successful action with the same normalized operation; unresolved incidents end at their latest failed attempt. `--context-events` adds surrounding normalized events on each side (default: 3). The generated scope records the operation, recovery state, anchor IDs, and context size. When combined with `--agent`, Backtrace refuses to hide any failure or recovery event required to understand the incident.
+
 Enforce agent-run quality in CI:
 
 ```bash

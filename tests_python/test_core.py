@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, render_markdown_summary
+from backtrace_agent.analysis import analyze_run, classify_side_effect, compare_runs, evaluate_policy, focus_incident, render_markdown_summary
 from backtrace_agent.cli import _watch, build_parser, build_policy_spec, load_policy, main
 from backtrace_agent.ci import render_junit_xml
 from backtrace_agent.bundle import verify_evidence_bundle, write_evidence_bundle
@@ -153,6 +153,45 @@ def test_focused_slice_rebases_events_marks_partial_turns_and_omits_cumulative_t
     assert cli_payload["run"]["metadata"]["scope"]["selected_event_count"] == 3
     assert verify_evidence_bundle(bundle, source_trace=trace)["source_verified"] is True
     assert main([str(trace), "--from-event", "e-2001000", "--compare", str(trace), "-o", str(report)]) == 2
+
+
+def test_automatic_incident_focus_expands_recovery_and_handles_unresolved_runs(tmp_path):
+    trace = codex_trace(tmp_path)
+    run = parse_trace(trace)
+    recovered = focus_incident(run, "e-2001000", context_events=0, agents=["CODEX"])
+    assert [event.id for event in recovered.events] == ["e-2001000", "e-2002000", "e-2003000"]
+    incident = recovered.metadata["scope"]["incident"]
+    assert incident["operation"] == "test"
+    assert incident["status"] == "recovered"
+    assert incident["failure_event_ids"] == ["e-2001000"]
+    assert incident["recovery_event_id"] == "e-2003000"
+    assert focus_incident(run, "e-2003000", context_events=0).metadata["scope"]["incident"]["id"] == incident["id"]
+    assert "Automatic incident focus: **test** (recovered)" in render_markdown_summary(recovered)
+    assert "Automatic incident focus selected <strong>test</strong>" in render_html(recovered)
+    with pytest.raises(ValueError, match="No failure incident"):
+        focus_incident(run, "missing-event")
+    with pytest.raises(ValueError, match="removes incident evidence"):
+        focus_incident(run, "e-2001000", agents=["user"])
+
+    unresolved_run = Run("unresolved", "test", [
+        Event("before", 0, "codex", "message", "Starting", ""),
+        Event("failed", 1000, "codex", "error", "Tests failed", "1 failed", "error", operation="test"),
+        Event("after", 2000, "codex", "message", "Investigating", ""),
+    ])
+    unresolved = focus_incident(unresolved_run, "failed", context_events=1)
+    assert [event.id for event in unresolved.events] == ["before", "failed", "after"]
+    assert unresolved.metadata["scope"]["incident"]["status"] == "unresolved"
+    assert unresolved.metadata["scope"]["incident"]["recovery_event_id"] is None
+
+    normalized = tmp_path / "incident.json"
+    report = tmp_path / "incident.html"
+    assert main([
+        str(trace), "--incident", "e-2001000", "--context-events", "0", "--agent", "codex",
+        "--normalized-output", str(normalized), "-o", str(report),
+    ]) == 0
+    assert json.loads(normalized.read_text())["run"]["metadata"]["scope"]["incident"]["status"] == "recovered"
+    assert main([str(trace), "--context-events", "1", "-o", str(report)]) == 2
+    assert main([str(trace), "--incident", "e-2001000", "--from-event", "e-2001000", "-o", str(report)]) == 2
 
 
 def test_compare_runs_finds_normalized_improvement(tmp_path):
