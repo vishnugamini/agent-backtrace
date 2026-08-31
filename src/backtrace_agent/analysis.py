@@ -80,6 +80,17 @@ def classify_side_effect(event: Event) -> dict[str, Any] | None:
 
 def analyze_run(run: Run) -> dict[str, Any]:
     """Compute factual, explainable run-level diagnostics."""
+    ingestion = run.metadata.get("ingestion") or {
+        "adapter": run.metadata.get("adapter", "unknown"),
+        "total_records": len(run.events),
+        "bookkeeping_records": 0,
+        "semantic_candidates": len(run.events),
+        "normalized_events": len(run.events),
+        "semantic_coverage_percent": 100.0,
+        "unsupported_completed_items": 0,
+        "unsupported_item_types": [],
+        "omitted_supported_items": 0,
+    }
     signals = detect_signals(run.events)
     tool_events = [event for event in run.events if event.kind in {"tool", "error"} and event.operation]
     file_events = [event for event in run.events if event.kind == "file"]
@@ -303,6 +314,7 @@ def analyze_run(run: Run) -> dict[str, Any]:
             ),
         },
         "timing": {"elapsed_ms": run.duration_ms, "measured_tool_ms": active_ms},
+        "ingestion": ingestion,
         "privacy": {
             "redactions": run.privacy_findings,
             "secret_findings": sum(value for key, value in run.privacy_findings.items() if key != "custom_suppression"),
@@ -646,6 +658,10 @@ def evaluate_policy(run: Run, policy: dict[str, Any], comparison: dict[str, Any]
         limit = int(policy["max_stalls"])
         actual = signal_counts["stall"]
         add("max_stalls", "Unexplained stalls", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} within-turn stall signal(s).")
+    if policy.get("max_unsupported_items") is not None:
+        limit = int(policy["max_unsupported_items"])
+        actual = analysis["ingestion"]["unsupported_completed_items"]
+        add("max_unsupported_items", "Unsupported completed items", actual, f"≤ {limit}", actual <= limit, f"Detected {actual} completed semantic item(s) whose provider type is not supported by this parser.")
     if policy.get("max_failure_rate") is not None:
         limit = float(policy["max_failure_rate"])
         add("max_failure_rate", "Failure rate", round(failure_rate, 2), f"≤ {limit:g}%", failure_rate <= limit, f"{counts['failures']} failures across {counts['actions']} actions.")
@@ -731,6 +747,16 @@ def render_markdown_summary(run: Run, comparison: dict[str, Any] | None = None, 
             f"Recorded cumulative tokens: **{token_stats['total_tokens']:,}**; {token_stats['tokens_per_action']:,} per meaningful action; {token_stats['input_cache_ratio_percent']}% input-cache ratio.",
             "These are trace counters, not billing or price estimates.",
         ])
+    ingestion = analysis["ingestion"]
+    lines.extend([
+        "", "## Ingestion coverage",
+        f"Adapter: **{ingestion['adapter']}**. Normalized **{ingestion['normalized_events']} of {ingestion['semantic_candidates']}** completed semantic candidate(s) ({ingestion['semantic_coverage_percent']}%).",
+        f"Bookkeeping records separated: **{ingestion['bookkeeping_records']}**. Unsupported completed items: **{ingestion['unsupported_completed_items']}**. Supported items omitted for empty content: **{ingestion['omitted_supported_items']}**.",
+    ])
+    lines.extend([
+        f"- `{item['type']}` — {item['count']} item(s)"
+        for item in ingestion["unsupported_item_types"]
+    ] or ["- No unsupported completed-item types detected."])
     incidents = analysis["incidents"]
     lines.extend(["", "## Failure incidents", f"Recovered: **{incidents['recovered']}**. Unresolved: **{incidents['unresolved']}**."])
     lines.extend([

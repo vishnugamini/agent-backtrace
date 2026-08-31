@@ -57,6 +57,17 @@ def test_generic_trace_and_repetition_signal(tmp_path):
     assert run.events[0].files == ["app/main.py"]
     assert run.duration_ms == 4000
     assert {signal.kind for signal in detect_signals(run.events)} == {"repetition", "failure"}
+    assert analyze_run(run)["ingestion"] == {
+        "adapter": "generic",
+        "total_records": 5,
+        "bookkeeping_records": 0,
+        "semantic_candidates": 5,
+        "normalized_events": 5,
+        "semantic_coverage_percent": 100.0,
+        "unsupported_completed_items": 0,
+        "unsupported_item_types": [],
+        "omitted_supported_items": 0,
+    }
 
 
 def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
@@ -76,6 +87,89 @@ def test_codex_adapter_uses_semantic_events_and_redacts(tmp_path):
     assert "raw" not in run.events[0].as_dict()
     assert run.metadata["source_fingerprint"] == f"sha256:{hashlib.sha256(trace.read_bytes()).hexdigest()}"
     assert run.metadata["source_bytes"] == len(trace.read_bytes())
+    assert run.metadata["ingestion"] == {
+        "adapter": "codex",
+        "total_records": 11,
+        "bookkeeping_records": 6,
+        "semantic_candidates": 5,
+        "normalized_events": 5,
+        "semantic_coverage_percent": 100.0,
+        "unsupported_completed_items": 0,
+        "unsupported_item_types": [],
+        "omitted_supported_items": 0,
+    }
+
+
+def test_ingestion_audit_exposes_schema_drift_empty_items_cli_and_gate(tmp_path, capsys):
+    trace = codex_trace(tmp_path)
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    records.extend([
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {"type": "PlanMutation", "id": "unknown-1", "steps": ["inspect", "patch"]},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {"type": "Reasoning", "id": "empty-reasoning", "summary": []},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {"type": "ContextCompaction", "id": "compaction-1"},
+            },
+        },
+    ])
+    drift_trace = write_jsonl(tmp_path, records, "schema-drift.jsonl")
+    run = parse_trace(drift_trace)
+    ingestion = analyze_run(run)["ingestion"]
+    assert ingestion["semantic_candidates"] == 8
+    assert ingestion["normalized_events"] == 6
+    assert ingestion["semantic_coverage_percent"] == 75.0
+    assert ingestion["unsupported_completed_items"] == 1
+    assert ingestion["unsupported_item_types"] == [{"type": "PlanMutation", "count": 1}]
+    assert ingestion["omitted_supported_items"] == 1
+    assert ingestion["bookkeeping_records"] == 6
+
+    no_report = tmp_path / "must-not-exist.html"
+    assert main([str(drift_trace), "--audit-ingestion", "--output", str(no_report)]) == 0
+    audit_text = capsys.readouterr().out
+    assert "coverage: 75.0%" in audit_text
+    assert "PlanMutation: 1" in audit_text
+    assert not no_report.exists()
+    assert main([str(drift_trace), "--audit-ingestion", "--json"]) == 0
+    audit_json = json.loads(capsys.readouterr().out)
+    assert audit_json["source_wide"] is True
+    assert audit_json["unsupported_completed_items"] == 1
+    assert main([str(drift_trace), "--audit-ingestion", "--watch"]) == 2
+    capsys.readouterr()
+
+    gate = evaluate_policy(run, {"max_unsupported_items": 0})
+    assert gate["passed"] is False
+    assert gate["checks"][0]["key"] == "max_unsupported_items"
+    assert main([str(trace), "--max-unsupported-items", "0", "-o", str(tmp_path / "clean.html")]) == 0
+    assert main([str(drift_trace), "--max-unsupported-items", "0", "-o", str(tmp_path / "drift.html")]) == 1
+    capsys.readouterr()
+    report = render_html(run, quality_gate=gate)
+    assert 'data-view="ingestion"' in report
+    assert "SOURCE-WIDE PARSER COVERAGE" in report
+    assert "PARSER DRIFT · 1 UNSUPPORTED" in report
+    assert "PlanMutation" in report
+    assert "including events outside the focused slice" not in report
+    focused = slice_run(run, from_event=run.events[0].id, to_event=run.events[1].id)
+    assert "including events outside the focused slice" in render_html(focused)
+    markdown = render_markdown_summary(run)
+    assert "## Ingestion coverage" in markdown
+    assert "`PlanMutation` — 1 item(s)" in markdown
 
 
 def test_analysis_separates_changed_and_referenced_files(tmp_path):

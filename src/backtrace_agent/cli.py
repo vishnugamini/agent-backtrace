@@ -17,7 +17,7 @@ from .core import build_restart_brief, detect_signals, parse_trace, slice_run, s
 from .report import write_report
 
 
-INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructive_actions", "max_repetitions", "max_stalls", "max_total_tokens"}
+INTEGER_POLICY_KEYS = {"max_failures", "max_unresolved_failures", "max_destructive_actions", "max_repetitions", "max_stalls", "max_total_tokens", "max_unsupported_items"}
 NUMBER_POLICY_KEYS = {"max_failure_rate", "max_tokens_per_action", "min_cache_ratio"}
 BOOLEAN_POLICY_KEYS = {"require_evidence", "fail_on_regression"}
 POLICY_KEYS = INTEGER_POLICY_KEYS | NUMBER_POLICY_KEYS | BOOLEAN_POLICY_KEYS
@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-kind", action="append", default=[], metavar="KIND", help="With --find, include only this normalized event kind; repeatable")
     parser.add_argument("--event-status", choices=("all", "ok", "error", "warning"), default="all", help="Filter --find by event status (default: all)")
     parser.add_argument("--find-limit", type=positive_int, default=20, metavar="N", help="Maximum --find results to return (default: 20)")
+    parser.add_argument("--audit-ingestion", action="store_true", help="Inspect parser coverage and unsupported provider item types without writing a report")
     parser.add_argument("--suppress", action="append", default=[], metavar="TERM", help="Remove lines and paths containing TERM from every generated artifact; repeatable")
     parser.add_argument("--restart-at", metavar="EVENT_ID", help="Also write a restart brief at an event ID")
     parser.add_argument("--brief-output", type=Path, default=Path("restart-brief.md"), help="Restart brief path")
@@ -87,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-destructive-actions", type=nonnegative_int, metavar="N", help="Fail when explicit destructive-action attempts exceed N")
     parser.add_argument("--max-repetitions", type=nonnegative_int, metavar="N", help="Fail the quality gate when repeated-action signals exceed N")
     parser.add_argument("--max-stalls", type=nonnegative_int, metavar="N", help="Fail the quality gate when within-turn stalls exceed N")
+    parser.add_argument("--max-unsupported-items", type=nonnegative_int, metavar="N", help="Fail when more than N completed semantic items use unsupported provider types")
     parser.add_argument("--max-failure-rate", type=nonnegative_float, metavar="PERCENT", help="Fail when failed actions exceed this percentage of actions")
     parser.add_argument("--require-evidence", action="store_true", help="Require at least one successful test, build, package, push, or deployment proof")
     parser.add_argument("--fail-on-regression", action="store_true", help="Fail when --compare produces a regressed verdict")
@@ -132,6 +134,7 @@ def build_policy_spec(args: argparse.Namespace) -> dict:
         "max_destructive_actions": args.max_destructive_actions,
         "max_repetitions": args.max_repetitions,
         "max_stalls": args.max_stalls,
+        "max_unsupported_items": args.max_unsupported_items,
         "max_failure_rate": args.max_failure_rate,
         "max_total_tokens": args.max_total_tokens,
         "max_tokens_per_action": args.max_tokens_per_action,
@@ -333,6 +336,43 @@ def _find_events(args: argparse.Namespace, trace: Path) -> int:
     return 0
 
 
+def _audit_ingestion(args: argparse.Namespace, trace: Path) -> int:
+    try:
+        run = parse_trace(trace)
+        if args.suppress:
+            run = suppress_content(run, args.suppress)
+        ingestion = analyze_run(run)["ingestion"]
+    except (OSError, ValueError) as exc:
+        print(f"backtrace-agent: {exc}", file=sys.stderr)
+        return 2
+    result = {
+        "source": str(trace.resolve()),
+        "source_wide": True,
+        **ingestion,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    print(f"Ingestion audit: {ingestion['adapter']} adapter · source-wide")
+    print(f"Source: {trace.resolve()}")
+    print(f"Raw records: {ingestion['total_records']} · bookkeeping separated: {ingestion['bookkeeping_records']}")
+    print(
+        f"Semantic candidates: {ingestion['semantic_candidates']} · normalized: {ingestion['normalized_events']} "
+        f"· coverage: {ingestion['semantic_coverage_percent']}%"
+    )
+    print(
+        f"Unsupported completed items: {ingestion['unsupported_completed_items']} "
+        f"· supported empty items omitted: {ingestion['omitted_supported_items']}"
+    )
+    if ingestion["unsupported_item_types"]:
+        print("Unsupported provider item types:")
+        for item in ingestion["unsupported_item_types"]:
+            print(f"- {item['type']}: {item['count']}")
+    else:
+        print("Unsupported provider item types: none detected")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify_source and not args.verify_bundle:
@@ -360,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         print("backtrace-agent: --incident-status requires --list-incidents", file=sys.stderr)
         return 2
     if args.list_incidents:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.find or args.event_kind or args.event_status != "all"
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.find or args.audit_ingestion or args.event_kind or args.event_status != "all"
         if conflicting:
             print("backtrace-agent: --list-incidents cannot be combined with watch, comparison, or focused-output options", file=sys.stderr)
             return 2
@@ -369,11 +409,17 @@ def main(argv: list[str] | None = None) -> int:
         print("backtrace-agent: --event-kind and --event-status require --find", file=sys.stderr)
         return 2
     if args.find:
-        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.audit_ingestion
         if conflicting:
             print("backtrace-agent: --find cannot be combined with watch, comparison, incident catalog, or focused-output options", file=sys.stderr)
             return 2
         return _find_events(args, trace)
+    if args.audit_ingestion:
+        conflicting = args.watch or args.incident or args.from_event or args.to_event or args.compare or args.list_incidents or args.find or args.event_kind or args.event_status != "all"
+        if conflicting:
+            print("backtrace-agent: --audit-ingestion cannot be combined with watch, comparison, search, incident, or focused-output options", file=sys.stderr)
+            return 2
+        return _audit_ingestion(args, trace)
     return _watch(args, trace) if args.watch else _process_once(args, trace)
 
 

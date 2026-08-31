@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shlex
+from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -12,6 +13,10 @@ from typing import Any, Iterable
 
 
 FILE_RE = re.compile(r"(?:^|[\s\"'`(])((?:\.?\.?/|/)?(?:[\w@.-]+/)+[\w@.+-]+\.[A-Za-z0-9]{1,10})(?=$|[\s\"'`),:])")
+SUPPORTED_CODEX_ITEM_TYPES = {
+    "UserMessage", "AgentMessage", "Reasoning", "CommandExecution", "FileChange",
+    "Extension", "McpToolCall", "DynamicToolCall", "SubAgentActivity", "ContextCompaction",
+}
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("openai_api_key", re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
@@ -580,6 +585,12 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
             action = str(item.get("kind") or "activity")
             title = f"{action.title()} subagent {path.split('/')[-1]}"
             event = Event(event_id, at_ms, "codex", "handoff", title, f"Agent path: {path}\nThread: {item.get('agent_thread_id', 'unknown')}", status, duration_ms, turn_id, f"subagent.{action}", metadata={"agent_path": path, "agent_thread_id": item.get("agent_thread_id")}, raw=item)
+        elif item_type == "ContextCompaction":
+            event = Event(
+                event_id, at_ms, "codex", "reasoning", "Compacted conversation context",
+                "The agent condensed earlier conversation state to continue within its context window.",
+                status, duration_ms, turn_id, "context.compact", raw=item,
+            )
 
         if event:
             events.append(event)
@@ -590,13 +601,36 @@ def _parse_codex(records: list[dict[str, Any]], name: str, raw: str) -> Run:
         turn.started_at_ms = max(0, turn.started_at_ms - first_ms)
         if turn.completed_at_ms is not None:
             turn.completed_at_ms = max(turn.started_at_ms, turn.completed_at_ms - first_ms)
+    completed_item_types = Counter(
+        str(record["payload"]["item"].get("type") or "unknown")
+        for record in records
+        if record.get("type") == "event_msg"
+        and isinstance(record.get("payload"), dict)
+        and record["payload"].get("type") == "item_completed"
+        and isinstance(record["payload"].get("item"), dict)
+    )
+    semantic_candidates = sum(completed_item_types.values())
+    unsupported_types = completed_item_types.keys() - SUPPORTED_CODEX_ITEM_TYPES
+    unsupported = Counter({item_type: completed_item_types[item_type] for item_type in unsupported_types})
+    supported_candidates = semantic_candidates - sum(unsupported.values())
+    ingestion = {
+        "adapter": "codex",
+        "total_records": len(records),
+        "bookkeeping_records": len(records) - semantic_candidates,
+        "semantic_candidates": semantic_candidates,
+        "normalized_events": len(events),
+        "semantic_coverage_percent": round(len(events) / semantic_candidates * 100, 1) if semantic_candidates else 100.0,
+        "unsupported_completed_items": sum(unsupported.values()),
+        "unsupported_item_types": [{"type": item_type, "count": count} for item_type, count in sorted(unsupported.items())],
+        "omitted_supported_items": max(0, supported_candidates - len(events)),
+    }
     return Run(
         name=name, source="Codex session", events=events, session_id=str(meta.get("session_id") or meta.get("id") or "") or None,
         goal=redact_secrets(goal), goal_status=goal_status, model=str(meta.get("model") or turn_context.get("model") or "") or None,
         cwd=str(meta.get("cwd") or turn_context.get("cwd") or "") or None, originator=str(meta.get("originator") or "") or None,
         cli_version=str(meta.get("cli_version") or "") or None, started_at=str(meta.get("timestamp") or "") or None,
         turns=turns, tokens=tokens, privacy_findings=scan_secrets(raw),
-        metadata={"record_count": len(records), "adapter": "codex", "ignored_record_count": len(records) - len(events)},
+        metadata={"record_count": len(records), "adapter": "codex", "ignored_record_count": len(records) - len(events), "ingestion": ingestion},
     )
 
 
@@ -628,7 +662,18 @@ def _parse_generic(records: list[dict[str, Any]], name: str, raw: str) -> Run:
         at_ms = max(0, round(timestamp - first)) if timestamp is not None and first else index * 1000
         status = "error" if kind == "error" else "warning" if re.search(r"warn|retry|timeout", detail, re.I) else "ok"
         events.append(Event(f"evt-{index+1:04d}", at_ms, agent, kind, title, _compact(detail, 700), status, operation=name_value or event_type, input=detail if kind == "tool" else "", files=_extract_files(content), raw=record))
-    return Run(name, "Generic trace", events, privacy_findings=scan_secrets(raw), metadata={"record_count": len(records), "adapter": "generic"})
+    ingestion = {
+        "adapter": "generic",
+        "total_records": len(records),
+        "bookkeeping_records": 0,
+        "semantic_candidates": len(records),
+        "normalized_events": len(events),
+        "semantic_coverage_percent": 100.0,
+        "unsupported_completed_items": 0,
+        "unsupported_item_types": [],
+        "omitted_supported_items": 0,
+    }
+    return Run(name, "Generic trace", events, privacy_findings=scan_secrets(raw), metadata={"record_count": len(records), "adapter": "generic", "ignored_record_count": 0, "ingestion": ingestion})
 
 
 def parse_trace(source: str | Path, *, name: str | None = None) -> Run:

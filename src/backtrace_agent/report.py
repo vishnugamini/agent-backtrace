@@ -96,6 +96,47 @@ $('#download-json').onclick=()=>save('backtrace-normalized.json',JSON.stringify(
     )
     template = template.replace("FILES TOUCHED", "FILES CHANGED").replace(">Touches<", ">Changes<")
     template = template.replace("secret occurrence(s) redacted", "privacy protection(s) applied").replace("potential secret occurrence(s) removed", "potentially sensitive item(s) removed")
+    ingestion = analysis["ingestion"]
+    unsupported_count = ingestion["unsupported_completed_items"]
+    ingestion_class = "warn" if unsupported_count else "good"
+    template = template.replace(
+        "</nav>",
+        f'<button class="tab" data-view="ingestion">Ingestion <span class="pill {ingestion_class}">{unsupported_count} unsupported</span></button></nav>',
+    )
+    if unsupported_count:
+        template = template.replace(
+            '</div></div><div class="header-actions">',
+            f'<span class="pill warn">PARSER DRIFT · {unsupported_count} UNSUPPORTED</span></div></div><div class="header-actions">',
+            1,
+        )
+    ingestion_cards = [
+        ("Raw records", ingestion["total_records"]),
+        ("Bookkeeping separated", ingestion["bookkeeping_records"]),
+        ("Semantic candidates", ingestion["semantic_candidates"]),
+        ("Normalized events", ingestion["normalized_events"]),
+        ("Semantic coverage", f'{ingestion["semantic_coverage_percent"]}%'),
+        ("Unsupported items", unsupported_count),
+    ]
+    ingestion_card_html = "".join(
+        f'<article class="compare-metric {"regressed" if label == "Unsupported items" and unsupported_count else "same"}"><span>{html.escape(label)}</span><strong>{html.escape(str(value))}</strong></article>'
+        for label, value in ingestion_cards
+    )
+    unsupported_rows = "".join(
+        f'<tr><td><code>{html.escape(item["type"])}</code></td><td>{item["count"]}</td><td>Provider item completed, but no semantic event adapter exists yet.</td></tr>'
+        for item in ingestion["unsupported_item_types"]
+    ) or '<tr><td colspan="3" class="empty">No unsupported completed-item types detected.</td></tr>'
+    scope_note = "This audit describes the complete source trace, including events outside the focused slice." if scope.get("active") else "This audit describes the complete source trace."
+    ingestion_view = (
+        '<section class="view" id="ingestion"><section class="panel"><div class="kicker">SOURCE-WIDE PARSER COVERAGE</div>'
+        '<h2>Did every meaningful provider item make it into the report?</h2>'
+        f'<p class="objective">{html.escape(scope_note)} Transport messages, token counters, turn boundaries, and other bookkeeping are separated intentionally; they are not missing agent actions.</p>'
+        f'<div class="comparison-grid">{ingestion_card_html}</div></section>'
+        '<section class="panel" style="margin-top:18px"><div class="kicker">SCHEMA DRIFT</div>'
+        f'<h2>{"Parser update may be needed" if unsupported_count else "No unsupported provider types detected"}</h2>'
+        f'<p>Supported items omitted because their semantic content was empty: <strong>{ingestion["omitted_supported_items"]}</strong>. These are tracked separately from unknown provider types.</p>'
+        f'<table><thead><tr><th>Provider type</th><th>Count</th><th>Interpretation</th></tr></thead><tbody>{unsupported_rows}</tbody></table></section></section>'
+    )
+    template = template.replace("</main>", ingestion_view + "</main>")
     token_stats = analysis["tokens"]
     if token_stats.get("total_tokens"):
         template = template.replace("</nav>", '<button class="tab" data-view="tokens">Tokens</button></nav>')

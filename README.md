@@ -13,6 +13,7 @@ Agent runs are increasingly long, parallel, and hard to supervise. A chat transc
 Backtrace focuses on the gap between **viewing a log** and **recovering from it**:
 
 - Collapse Codex bookkeeping into meaningful user, reasoning, tool, file, and subagent events.
+- Audit parser coverage so new provider item types cannot disappear silently as trace schemas evolve.
 - Reconstruct turns, commands, durations, exit codes, changed files, and reported outcomes.
 - Flag repeated actions, failed steps, recoveries, slow actions, and unexplained stalls.
 - Reconstruct the run into understandable workflow phases and show how the agent moved between them.
@@ -124,6 +125,15 @@ backtrace-agent run.jsonl --find "src/app.py" --event-kind file --find-limit 50 
 
 Search is case-insensitive across stable event IDs, titles, operations, sanitized details, commands, output, agents, and files. Exact event-ID matches rank first, followed by titles, operations, and file paths, then broader evidence. `--event-kind`, `--event-status`, repeatable `--agent`, and `--find-limit` narrow results. Text results include a complete one-event slice command; `--json` returns the same ranked, privacy-safe records for automation. Search mode never writes or refreshes report artifacts. The HTML event inspector also offers a slice command template for its selected checkpoint.
 
+Audit ingestion before trusting a report built from a newly changed provider schema:
+
+```bash
+backtrace-agent run.jsonl --audit-ingestion
+backtrace-agent run.jsonl --audit-ingestion --json > ingestion-audit.json
+```
+
+The audit separates transport and bookkeeping records from completed semantic candidates, reports how many candidates became normalized events, identifies supported items omitted because their content was empty, and names unknown completed-item types with counts. Audit mode is source-wide and exits without writing report artifacts. This distinction matters: a low normalized-to-raw-record ratio is normal for verbose agent transports, while an unsupported semantic type may mean the parser needs an update.
+
 Enforce agent-run quality in CI:
 
 ```bash
@@ -134,6 +144,7 @@ backtrace-agent current.jsonl \
   --max-destructive-actions 0 \
   --max-repetitions 0 \
   --max-stalls 1 \
+  --max-unsupported-items 0 \
   --max-failure-rate 5 \
   --require-evidence \
   --fail-on-regression \
@@ -141,6 +152,8 @@ backtrace-agent current.jsonl \
 ```
 
 Configured checks are embedded in HTML, JSON, and Markdown with actual and expected values. The command exits `1` if any check fails and `0` when every check passes, making the result usable in GitHub Actions and other CI systems. `--fail-on-errors` remains a shorthand for `--max-failures 0`.
+
+`--max-unsupported-items 0` is the schema-drift guardrail: it makes CI fail when a provider introduces completed semantic items the installed parser does not understand.
 
 Keep those rules in version control instead of repeating flags:
 
@@ -197,15 +210,16 @@ backtrace-agent examples/demo.jsonl --json > normalized.json
 The generated HTML report is self-contained: no server, database, API key, CDN, or tracking script. Open it in any modern browser and:
 
 1. Start from the objective, turn outcomes, completion evidence, and run-level counts.
-2. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
-3. Open **Incidents** to separate recovered failures from unresolved operations and inspect their recovery chains.
-4. Audit **Side effects** to see what the agent changed outside its own working memory.
-5. Use **Agent map** to see when each agent spoke, reasoned, used tools, changed files, handed off, or failed on a shared run clock.
-6. Filter and search the meaningful timeline by kind, status, or user turn.
-7. Inspect exact commands, sanitized output, duration, exit code, and related files.
-8. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
-9. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
-10. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
+2. Check **Ingestion** to confirm source-wide semantic coverage and expose provider schema drift.
+3. Read the **Workflow** view to see Understand, Inspect, Implement, Verify, Publish, Coordinate, and Communication phases, including measured time, failures, files, and common transitions.
+4. Open **Incidents** to separate recovered failures from unresolved operations and inspect their recovery chains.
+5. Audit **Side effects** to see what the agent changed outside its own working memory.
+6. Use **Agent map** to see when each agent spoke, reasoned, used tools, changed files, handed off, or failed on a shared run clock.
+7. Filter and search the meaningful timeline by kind, status, or user turn.
+8. Inspect exact commands, sanitized output, duration, exit code, and related files.
+9. Jump from a failure, repetition, recovery, stall, or slow-action signal to its evidence.
+10. Download sanitized JSON, a Markdown summary, or a restart brief from any checkpoint.
+11. When `--compare` is used, review a dedicated baseline tab with normalized deltas, regressions, improvements, and scope changes.
 
 The map includes per-agent action, failure, measured-time, file, and top-operation summaries. Event marks remain clickable even on a dense run, opening the same checkpoint inspector and review actions used elsewhere in the report.
 

@@ -4,6 +4,7 @@
   "max_destructive_actions": 0,
   "max_repetitions": 0,
   "max_stalls": 1,
+  "max_unsupported_items": 0,
   "max_failure_rate": 5,
   "require_evidence": true
 }
